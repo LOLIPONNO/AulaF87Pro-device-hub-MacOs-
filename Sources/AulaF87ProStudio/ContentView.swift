@@ -1119,13 +1119,13 @@ struct ContentView: View {
     private var batteryMonitorTabView: some View {
         let tel = vm.powerTelemetry
         return VStack(alignment: .leading, spacing: 18) {
-            // Real-time 1-Second Auto Refresh Status Banner
-            HStack(spacing: 12) {
+            // Real-time Refresh Status Banner with Configurable Interval
+            HStack(spacing: 10) {
                 HStack(spacing: 6) {
                     Circle()
                         .fill(vm.isConnected ? Color.green : Color.orange)
                         .frame(width: 8, height: 8)
-                    Text("1초 실시간 모니터링 활성화")
+                    Text("\(String(format: "%.1f", vm.refreshInterval))초 실시간 연동")
                         .font(.caption.bold())
                         .foregroundStyle(vm.isConnected ? Color.green : Color.orange)
                 }
@@ -1133,9 +1133,28 @@ struct ContentView: View {
                 .padding(.vertical, 4)
                 .background(Capsule().fill((vm.isConnected ? Color.green : Color.orange).opacity(0.12)))
 
-                Text("하드웨어 패킷 1,000ms 주기 갱신 · 소비 전력 및 잔여 시간 실시간 계산")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                // Interval Picker Menu
+                Menu {
+                    Button("0.5초 (초고속 실시간)") { vm.setRefreshInterval(0.5) }
+                    Button("1.0초 (표준 권장)") { vm.setRefreshInterval(1.0) }
+                    Button("2.0초 (부드러운 연동)") { vm.setRefreshInterval(2.0) }
+                    Button("3.0초 (보통 주기)") { vm.setRefreshInterval(3.0) }
+                    Button("5.0초 (초절전 모니터링)") { vm.setRefreshInterval(5.0) }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "timer")
+                            .font(.caption2)
+                        Text("주기: \(String(format: "%.1f", vm.refreshInterval))s")
+                            .font(.caption2.bold())
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 8))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
 
                 Spacer()
 
@@ -1151,7 +1170,7 @@ struct ContentView: View {
                 Button {
                     vm.forcePollBatteryNow()
                 } label: {
-                    Label("지금 즉시 갱신", systemImage: "arrow.clockwise")
+                    Label("지금 갱신", systemImage: "arrow.clockwise")
                         .font(.caption2)
                 }
                 .buttonStyle(.bordered)
@@ -1175,7 +1194,7 @@ struct ContentView: View {
                                 .foregroundStyle(batteryColor(for: vm.battery ?? BatteryStatus(percent: tel.percent, isCharging: tel.isCharging, updatedAt: .now)))
                         }
 
-                        // Progress Gauge Bar
+                        // Progress Gauge Bar with AlDente Limit Line
                         GeometryReader { geo in
                             ZStack(alignment: .leading) {
                                 Capsule()
@@ -1189,6 +1208,14 @@ struct ContentView: View {
                                         )
                                     )
                                     .frame(width: max(8, geo.size.width * CGFloat(tel.percent) / 100.0))
+
+                                if vm.isAlDenteEnabled {
+                                    let markX = geo.size.width * CGFloat(vm.alDenteLimitPercent) / 100.0
+                                    Rectangle()
+                                        .fill(Color.orange)
+                                        .frame(width: 2, height: 12)
+                                        .offset(x: max(0, min(geo.size.width - 2, markX - 1)), y: -2)
+                                }
                             }
                         }
                         .frame(height: 8)
@@ -1198,9 +1225,15 @@ struct ContentView: View {
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
                             Spacer()
-                            Text("내장 용량: 4,000 mAh")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                            if vm.isAlDenteEnabled {
+                                Text("AlDente 목표: \(vm.alDenteLimitPercent)%")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.orange)
+                            } else {
+                                Text("내장 용량: 4,000 mAh")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                     }
                     .padding(8)
@@ -1371,6 +1404,106 @@ struct ContentView: View {
                     }
                     .padding(6)
                 }
+            }
+
+            // AlDente Battery Health Guard Card
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "shield.lefthalf.filled.badge.checkmark")
+                            .font(.system(size: 26))
+                            .foregroundStyle(vm.isAlDenteEnabled ? (vm.isAlDenteTriggered ? Color.orange : Color.green) : Color.secondary)
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text("AlDente 배터리 수명 보호기")
+                                    .font(.system(size: 14, weight: .bold))
+
+                                if vm.isAlDenteEnabled {
+                                    if vm.isAlDenteTriggered {
+                                        HStack(spacing: 4) {
+                                            Circle().fill(Color.orange).frame(width: 7, height: 7)
+                                            Text("⚠️ 목표 한계(\(vm.alDenteLimitPercent)%) 도달 · 케이블 분리 권장")
+                                                .font(.caption2.bold())
+                                                .foregroundStyle(Color.orange)
+                                        }
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(Capsule().fill(Color.orange.opacity(0.14)))
+                                    } else {
+                                        HStack(spacing: 4) {
+                                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                                            Text("보호 활성화 중 (목표 \(vm.alDenteLimitPercent)%)")
+                                                .font(.caption2.bold())
+                                                .foregroundStyle(Color.green)
+                                        }
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(Capsule().fill(Color.green.opacity(0.12)))
+                                    }
+                                }
+                            }
+
+                            Text("리튬이온 배터리를 100%까지 지속 완충하지 않고 70~80%에서 유지하여 배터리 수명을 최대 3배 연장합니다.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer()
+
+                        Toggle("", isOn: $vm.isAlDenteEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+
+                    if vm.isAlDenteEnabled {
+                        Divider()
+
+                        HStack(spacing: 16) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text("충전 제한 목표치:")
+                                        .font(.caption.bold())
+                                    Text("\(vm.alDenteLimitPercent)%")
+                                        .font(.caption.bold().monospacedDigit())
+                                        .foregroundStyle(.orange)
+                                }
+
+                                HStack(spacing: 6) {
+                                    ForEach([70, 75, 80, 85, 90], id: \.self) { pct in
+                                        Button {
+                                            vm.alDenteLimitPercent = pct
+                                        } label: {
+                                            Text(pct == 80 ? "80% (권장)" : "\(pct)%")
+                                                .font(.caption2.bold())
+                                                .padding(.horizontal, 8)
+                                                .padding(.vertical, 4)
+                                                .background(
+                                                    RoundedRectangle(cornerRadius: 6)
+                                                        .fill(vm.alDenteLimitPercent == pct ? Color.orange : Color.primary.opacity(0.06))
+                                                )
+                                                .foregroundStyle(vm.alDenteLimitPercent == pct ? Color.white : Color.primary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+
+                            Spacer()
+
+                            VStack(alignment: .trailing, spacing: 6) {
+                                Toggle("한계 도달 시 사운드 알림", isOn: $vm.alDenteSoundAlert)
+                                    .font(.caption)
+                                    .toggleStyle(.checkbox)
+
+                                Text("80% 제한 시 예상 사이클 수명: 약 1,500회 (기본 500회 대비 3배)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(8)
             }
 
             // 2. Power Breakdown & Battery Life Simulation

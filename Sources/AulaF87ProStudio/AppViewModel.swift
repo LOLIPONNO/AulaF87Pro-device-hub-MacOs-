@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import SwiftUI
+import UserNotifications
 
 enum NavigationTab: String, CaseIterable, Identifiable {
     case batteryMonitor = "배터리 & 소비 전력 모니터"
@@ -92,6 +93,48 @@ final class AppViewModel: ObservableObject {
     @Published var logs: [String] = []
     @Published var lastTelemetryUpdate: Date = .now
 
+    // User-configurable Telemetry Refresh Interval (0.5s ~ 5.0s)
+    @Published var refreshInterval: Double = {
+        let saved = UserDefaults.standard.double(forKey: "telemetryRefreshInterval")
+        return (saved >= 0.5 && saved <= 10.0) ? saved : 1.0
+    }() {
+        didSet {
+            UserDefaults.standard.set(refreshInterval, forKey: "telemetryRefreshInterval")
+            restartBatteryPolling()
+        }
+    }
+
+    // AlDente Battery Health Guard State
+    @Published var isAlDenteEnabled: Bool = {
+        UserDefaults.standard.object(forKey: "alDenteEnabled") as? Bool ?? true
+    }() {
+        didSet {
+            UserDefaults.standard.set(isAlDenteEnabled, forKey: "alDenteEnabled")
+            checkAlDenteNotification()
+        }
+    }
+
+    @Published var alDenteLimitPercent: Int = {
+        let saved = UserDefaults.standard.integer(forKey: "alDenteLimitPercent")
+        return (saved >= 50 && saved <= 95) ? saved : 80
+    }() {
+        didSet {
+            UserDefaults.standard.set(alDenteLimitPercent, forKey: "alDenteLimitPercent")
+            checkAlDenteNotification()
+        }
+    }
+
+    @Published var alDenteSoundAlert: Bool = {
+        UserDefaults.standard.object(forKey: "alDenteSoundAlert") as? Bool ?? true
+    }() {
+        didSet {
+            UserDefaults.standard.set(alDenteSoundAlert, forKey: "alDenteSoundAlert")
+        }
+    }
+
+    @Published var isAlDenteTriggered: Bool = false
+    private var lastAlDenteAlertTime: Date?
+
     // Keystroke & Reactive Typing Tracking
     @Published var isTypingNow: Bool = false
     @Published var typingSpeedCPM: Int = 0
@@ -102,14 +145,23 @@ final class AppViewModel: ObservableObject {
     private var globalKeyMonitor: Any?
 
     private static let macKeyCodeToLed: [UInt16: Int] = [
+        // Function Row
         53: 0, 122: 12, 120: 18, 99: 24, 118: 30, 96: 36, 97: 42, 98: 48, 100: 54, 101: 60, 109: 66, 103: 72, 111: 78,
+        105: 84, 107: 90, 113: 96,
+        // Number Row
         50: 1, 18: 7, 19: 13, 20: 19, 21: 25, 23: 31, 22: 37, 26: 43, 28: 49, 25: 55, 29: 61, 27: 67, 24: 73, 51: 79,
+        114: 85, 115: 91, 116: 97,
+        // QWERTY Row
         48: 2, 12: 8, 13: 14, 14: 20, 15: 26, 17: 32, 16: 38, 32: 44, 34: 50, 31: 56, 35: 62, 33: 68, 30: 74, 42: 80,
-        57: 3, 0: 9, 1: 15, 2: 21, 3: 27, 5: 33, 4: 39, 38: 45, 40: 51, 37: 57, 41: 63, 39: 69, 36: 75,
-        56: 4, 6: 10, 7: 16, 8: 22, 9: 28, 11: 34, 45: 40, 46: 46, 43: 52, 47: 58, 44: 64, 60: 70,
-        59: 5, 55: 11, 58: 17, 49: 35, 61: 53, 62: 83,
-        123: 89, 125: 95, 124: 101, 126: 94,
-        114: 85, 115: 91, 116: 97, 117: 86, 119: 92, 121: 98
+        117: 86, 119: 92, 121: 98,
+        // Home Row (Enter is slot 81)
+        57: 3, 0: 9, 1: 15, 2: 21, 3: 27, 5: 33, 4: 39, 38: 45, 40: 51, 37: 57, 41: 63, 39: 69, 36: 81,
+        // Shift Row (RShift is slot 82)
+        56: 4, 6: 10, 7: 16, 8: 22, 9: 28, 11: 34, 45: 40, 46: 46, 43: 52, 47: 58, 44: 64, 60: 82,
+        126: 94,
+        // Bottom Row
+        59: 5, 55: 11, 58: 17, 49: 35, 61: 53, 63: 59, 110: 65, 62: 83,
+        123: 89, 125: 95, 124: 101
     ]
 
     private var undoStack: [[Int: RGBColor]] = []
@@ -132,6 +184,7 @@ final class AppViewModel: ObservableObject {
         perKeyColors = hidService.loadPerKeyCache()
         loadProfilesFromDisk()
         setupKeyMonitoring()
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         if !CommandLine.arguments.contains("--probe") {
             connectKeyboard()
             startBatteryPolling()
@@ -257,19 +310,65 @@ final class AppViewModel: ObservableObject {
 
     func registerKeystroke(keyCode: UInt16) {
         let now = Date()
-        let led = Self.macKeyCodeToLed[keyCode] ?? 35
         keystrokeTimestamps.append(now)
         let cutoff = now.addingTimeInterval(-5.0)
         keystrokeTimestamps.removeAll { $0 < cutoff }
         lastKeystrokeAt = now
         isTypingNow = true
         typingSpeedCPM = keystrokeTimestamps.count * 12
-        activeKeyHits[led] = now.timeIntervalSinceReferenceDate
+        if let led = Self.macKeyCodeToLed[keyCode] {
+            activeKeyHits[led] = now.timeIntervalSinceReferenceDate
+        }
+    }
+
+    func setRefreshInterval(_ val: Double) {
+        refreshInterval = max(0.5, min(10.0, val))
+        showToast("갱신 주기가 \(String(format: "%.1f", refreshInterval))초로 설정되었습니다")
+    }
+
+    func restartBatteryPolling() {
+        batteryTimer?.invalidate()
+        startBatteryPolling()
+    }
+
+    func checkAlDenteNotification() {
+        guard isAlDenteEnabled, let bat = battery else {
+            isAlDenteTriggered = false
+            return
+        }
+
+        let reached = bat.isCharging && bat.percent >= alDenteLimitPercent
+        isAlDenteTriggered = reached
+
+        if reached {
+            let now = Date()
+            if let last = lastAlDenteAlertTime, now.timeIntervalSince(last) < 120 {
+                return
+            }
+            lastAlDenteAlertTime = now
+
+            if alDenteSoundAlert {
+                NSSound.beep()
+            }
+            sendAlDenteSystemNotification(percent: bat.percent, limit: alDenteLimitPercent)
+            showToast("🛡️ [AlDente 배터리 보호] \(alDenteLimitPercent)% 충전 한계에 도달했습니다! 케이블을 분리해주세요.")
+        }
+    }
+
+    private func sendAlDenteSystemNotification(percent: Int, limit: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "🛡️ AlDente 배터리 수명 보호"
+        content.subtitle = "AULA F87 Pro V1 (\(percent)%)"
+        content.body = "목표 충전 한계(\(limit)%)에 도달했습니다. 리튬이온 배터리 수명 보호를 위해 충전 케이블을 분리하거나 무선 모드로 전환해주세요."
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: "aldente-limit-\(Date().timeIntervalSince1970)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { _ in }
     }
 
     private func startBatteryPolling() {
         batteryTimer?.invalidate()
-        batteryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        batteryTimer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.isBusy, !self.isMusicSyncActive, !self.isPollingHID else { return }
                 self.lastTelemetryUpdate = .now
@@ -305,6 +404,7 @@ final class AppViewModel: ObservableObject {
                                 self.applySnapshotToUI(snap)
                                 self.statusTitle = "\(snap.modelName) 연결됨"
                                 self.statusDetail = nil
+                                self.checkAlDenteNotification()
                                 if changedMode {
                                     self.log("자동 연결 감지: \(snap.modelName) (\(snap.connectionMode))")
                                     self.showToast("\(snap.connectionMode) 연결됨")
@@ -314,6 +414,7 @@ final class AppViewModel: ObservableObject {
                     } else if let bat = service.pollBattery() {
                         DispatchQueue.main.async {
                             self?.battery = bat
+                            self?.checkAlDenteNotification()
                         }
                     }
                 }
@@ -335,6 +436,7 @@ final class AppViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     self.battery = bat
                     self.lastTelemetryUpdate = .now
+                    self.checkAlDenteNotification()
                     self.showToast("실시간 배터리 및 전력 정보 갱신 완료 (\(bat.percent)%)")
                 }
             }

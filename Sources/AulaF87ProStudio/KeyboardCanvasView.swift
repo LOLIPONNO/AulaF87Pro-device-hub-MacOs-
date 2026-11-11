@@ -436,31 +436,17 @@ struct KeyboardCanvasView: View {
                 return tintedColor(hue: diag, intensity: ribbon, isRainbow: isRainbow, bScale: bScale)
 
             case 12:
-                // 12. 반응형 타건 (Reactive): 실제 물리 키보드 타건에 즉각 점등 후 감쇠. 평상시 완전 소등(0 mA)
-                var maxIntensity = 0.0
-                var hitHue = 0.55
-                for (hitLed, hitTime) in vm.activeKeyHits {
-                    let elapsed = phase - hitTime
-                    guard elapsed >= 0 && elapsed < 0.70 else { continue }
-                    if hitLed == key.led {
-                        let selfFade = exp(-elapsed * 4.6)
-                        if selfFade > maxIntensity {
-                            maxIntensity = selfFade
-                            hitHue = Double((hitLed * 17) % 100) / 100.0
-                        }
-                    } else {
-                        // 타건된 키 바로 인접 키로의 미세한 스플래시
-                        let hitCol = Double(hitLed % 17)
-                        let d = abs(x - hitCol)
-                        if d < 1.1 {
-                            let splash = max(0.0, 1.0 - d / 1.1) * exp(-elapsed * 6.5) * 0.35
-                            if splash > maxIntensity {
-                                maxIntensity = splash
-                            }
-                        }
-                    }
+                // 12. 반응형 타건 (Reactive): 오직 실제로 누른 바로 그 키만 정확히 점등 후 소등 (주변 키 간섭/스플래시 없음)
+                guard let hitTime = vm.activeKeyHits[key.led] else {
+                    return tintedColor(hue: 0, intensity: 0.0, isRainbow: isRainbow, bScale: bScale)
                 }
-                return tintedColor(hue: hitHue, intensity: maxIntensity, isRainbow: isRainbow, bScale: bScale)
+                let elapsed = phase - hitTime
+                guard elapsed >= 0 && elapsed < 0.65 else {
+                    return tintedColor(hue: 0, intensity: 0.0, isRainbow: isRainbow, bScale: bScale)
+                }
+                let intensity = exp(-elapsed * 4.8)
+                let hitHue = isRainbow ? (Double((key.led * 17 + 23) % 100) / 100.0) : 0.0
+                return tintedColor(hue: hitHue, intensity: intensity, isRainbow: isRainbow, bScale: bScale)
 
             case 13:
                 // 13. 사인파 웨이브 (Sine Wave): 키보드 상하(Row 0~5)를 실제로 오르락내리락하는 사인 곡선 궤적
