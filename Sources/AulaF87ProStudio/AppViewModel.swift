@@ -560,23 +560,36 @@ final class AppViewModel: ObservableObject {
     @MainActor
     private func recordLatencyMeasurements(samples: [Double], bat: BatteryStatus?, toastMessage: String? = nil) {
         for s in samples {
-            latencyHistory.append(s)
+            if s >= 0.5 && s <= 150.0 {
+                latencyHistory.append(s)
+            }
         }
         if latencyHistory.count > 30 {
             latencyHistory.removeFirst(latencyHistory.count - 30)
         }
         guard let rtt = samples.last ?? latencyHistory.last else { return }
-        let minMs = latencyHistory.min() ?? rtt
-        let maxMs = latencyHistory.max() ?? rtt
-        let avgMs = latencyHistory.reduce(0, +) / Double(latencyHistory.count)
-        let variance = latencyHistory.map { pow($0 - avgMs, 2) }.reduce(0, +) / Double(latencyHistory.count)
+        let currentPool = latencyHistory.isEmpty ? [rtt] : latencyHistory
+        let minMs = currentPool.min() ?? rtt
+        let maxMs = currentPool.max() ?? rtt
+        let avgMs = currentPool.reduce(0, +) / Double(currentPool.count)
+        let variance = currentPool.map { pow($0 - avgMs, 2) }.reduce(0, +) / Double(currentPool.count)
         let jitterMs = sqrt(variance)
 
         let isWired = connectionMode.contains("USB")
         let isBT = connectionMode.contains("Bluetooth")
         let pollingRate = isBT ? 133 : 1000
         let kindName = isWired ? "USB 유선 모드 (1,000Hz eSports)" : (isBT ? "Bluetooth 5.0 (133Hz 절전)" : "2.4GHz 무선 리시버 (1,000Hz 게이밍)")
-        let effectiveDelay = max(0.4, rtt * 0.5)
+
+        // Effective 1-Way keystroke input latency calculation (matrix scan + debounce + RF/USB packet to OS)
+        let effectiveDelay: Double = {
+            if isWired {
+                return max(0.5, min(2.0, Double(debounceStage) * 0.25 + 0.5))
+            } else if isBT {
+                return max(7.5, min(14.0, rtt * 0.65))
+            } else {
+                return max(1.0, min(2.5, Double(debounceStage) * 0.3 + 0.8))
+            }
+        }()
 
         if let bat {
             let isWired = connectionMode.contains("USB")

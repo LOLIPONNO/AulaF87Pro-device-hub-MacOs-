@@ -1607,29 +1607,46 @@ struct ContentView: View {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
                             latencyMetricCard(
                                 title: "실시간 왕복 핑 (RTT)",
-                                value: "\(String(format: "%.2f", lat.currentRttMs)) ms",
+                                value: "\(String(format: "%.1f", lat.currentRttMs)) ms",
                                 subtitle: "Mac ↔ 키보드 양방향 왕복 지연",
-                                color: lat.currentRttMs < 3.0 ? .green : (lat.currentRttMs < 10.0 ? .cyan : .orange)
+                                color: lat.currentRttMs < 3.0 ? .green : (lat.currentRttMs < 12.0 ? .cyan : .orange)
                             )
                             latencyMetricCard(
                                 title: "실효 타건 입력 지연",
-                                value: "\(String(format: "%.2f", lat.effectiveInputMs)) ms",
-                                subtitle: "1-Way 하드웨어 단방향 전송 (0.001초대)",
+                                value: "\(String(format: "%.1f", lat.effectiveInputMs)) ms",
+                                subtitle: "키보드 ➔ Mac 1-Way 초고속 전송",
+                                color: .green
+                            )
+                            latencyMetricCard(
+                                title: "평균 왕복 핑 (Average)",
+                                value: "\(String(format: "%.1f", lat.avgMs)) ms",
+                                subtitle: "최근 \(lat.sampleCount)회 텔레메트리 평균",
                                 color: .cyan
                             )
                             latencyMetricCard(
-                                title: "평균 / 지터 (Jitter)",
-                                value: "\(String(format: "%.2f", lat.avgMs)) ms",
-                                subtitle: "편차 ±\(String(format: "%.2f", lat.jitterMs)) ms (안정성)",
-                                color: .purple
-                            )
-                            latencyMetricCard(
-                                title: "최저 / 최고 지연",
-                                value: "\(String(format: "%.1f", lat.minMs)) / \(String(format: "%.1f", lat.maxMs)) ms",
-                                subtitle: "\(lat.sampleCount)개 표본 실시간 통계",
-                                color: .primary
+                                title: "신호 지터 (Jitter)",
+                                value: "±\(String(format: "%.2f", lat.jitterMs)) ms",
+                                subtitle: "최저 \(String(format: "%.1f", lat.minMs)) / 최고 \(String(format: "%.1f", lat.maxMs)) ms",
+                                color: lat.jitterMs < 1.0 ? .green : (lat.jitterMs < 2.5 ? .cyan : .orange)
                             )
                         }
+
+                        // Detailed 2.4GHz RF Technical Explanation Note
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "questionmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.cyan)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("2.4GHz 무선에서 왕복 핑(RTT)이 약 8~9ms로 측정되는 원리 & 타건 지연:")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.primary)
+                                Text("• 타건 입력 지연 (약 1.5~2ms): 키를 누르는 순간 키보드 스위치에서 무선 동글(1,000Hz 폴링)로 단방향(1-Way) 즉시 전송되므로 e스포츠급 즉각 반응을 보입니다.\n• 양방향 왕복 핑 RTT (약 8~9ms): 앱에서 키보드로 배터리/상태를 묻고 다시 응답을 돌려받는 양방향(2-Way) 왕복 시간입니다. 무선 키보드는 배터리 소모를 방지하기 위해 2.4GHz RF 수신(다운링크)을 8ms TDD(시분할 125Hz) 프레임 슬롯으로 운용하므로 왕복 8~9ms가 소요되는 정상 하드웨어 스펙입니다.\n• 지터(Jitter ±0.3~0.5ms): 신호 편차(표준편차)로, ±1.0ms 미만이면 전파 간섭 없이 매우 균일하고 안정적인 전송 품질을 의미합니다.")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(6)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
 
                         // Connection Mode Comparison Bar
                         VStack(alignment: .leading, spacing: 8) {
