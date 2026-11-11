@@ -1280,8 +1280,8 @@ struct ContentView: View {
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             } else {
-                                let modeDesc = vm.connectionMode.contains("USB") ? "USB 유선 연결" : (vm.connectionMode.contains("Bluetooth") ? "Bluetooth 무선 배터리 구동" : "2.4GHz 무선 배터리 구동")
-                                Text("\(modeDesc) 중 (케이블 미감지)")
+                                let modeDesc = vm.connectionMode.contains("USB") ? "USB 유선 연결" : (vm.connectionMode.contains("Bluetooth") ? "Bluetooth 5.0 무선 구동" : "2.4GHz 고속 무선 구동")
+                                Text("\(modeDesc) · 배터리 방전 중")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -1289,7 +1289,7 @@ struct ContentView: View {
                         }
 
                         HStack {
-                            Text(tel.isCharging ? "시간당 약 +17% 고속 충전 중 (완충 시 보호)" : "외부 충전기 연결 시 아래 버튼으로 전환")
+                            Text(tel.isCharging ? "실시간 키보드 BMS 패킷(13 4A) 수신 중 · 시간당 약 +17% 충전" : "충전 케이블 연결 시 키보드 BMS에서 자동으로 즉시 감지됩니다")
                                 .font(.caption2)
                                 .foregroundStyle(tel.isCharging ? .green : .secondary)
                             Spacer()
@@ -1298,43 +1298,26 @@ struct ContentView: View {
                         Divider().padding(.vertical, 2)
 
                         HStack(spacing: 8) {
-                            Button {
-                                vm.toggleChargingOverride()
-                            } label: {
-                                Label(
-                                    tel.isCharging ? "미충전(무선 구동)으로 전환" : "충전 케이블 연결됨으로 지정 (충전 중 ⚡)",
-                                    systemImage: tel.isCharging ? "battery.75percent" : "bolt.fill"
-                                )
-                                .font(.caption2.bold())
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(tel.isCharging ? Color.green : Color.secondary)
+                                    .frame(width: 7, height: 7)
+                                Text(tel.isCharging ? "하드웨어 BMS 충전 실시간 감지됨 ⚡" : "하드웨어 배터리 방전 상태")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(tel.isCharging ? Color.green : Color.secondary)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .tint(tel.isCharging ? .secondary : .green)
-                            .controlSize(.small)
 
                             Spacer()
 
-                            Menu {
-                                ForEach(ChargingOverrideMode.allCases) { mode in
-                                    Button {
-                                        vm.setChargingMode(mode)
-                                    } label: {
-                                        if vm.chargingOverrideMode == mode {
-                                            Label(mode.rawValue, systemImage: "checkmark")
-                                        } else {
-                                            Text(mode.rawValue)
-                                        }
-                                    }
-                                }
+                            Button {
+                                vm.forcePollBatteryNow()
                             } label: {
-                                HStack(spacing: 4) {
-                                    Text("감지: \(vm.chargingOverrideMode.shortLabel)")
-                                        .font(.caption2)
-                                    Image(systemName: "chevron.up.chevron.down")
-                                        .font(.system(size: 9))
-                                }
+                                Label("실시간 즉시 핑 갱신", systemImage: "arrow.clockwise")
+                                    .font(.caption2)
                             }
-                            .menuStyle(.borderlessButton)
-                            .fixedSize()
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(vm.isBusy)
                         }
                     }
                     .padding(8)
@@ -1560,6 +1543,25 @@ struct ContentView: View {
                                     .foregroundStyle(.secondary)
                             }
                         }
+
+                        Divider()
+
+                        // Hardware BMS Technical Note
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.cyan)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("하드웨어 BMS 80% 제한 관련 안내 (기술 분석):")
+                                    .font(.caption2.bold())
+                                    .foregroundStyle(.primary)
+                                Text("AULA F87 Pro를 포함한 대부분의 기계식 키보드는 충전 회로에 고정 전압 리니어 충전 IC(LP4067/TP4056 계열)와 DW01A 보호 회로를 사용합니다. 충전 차단 전압이 4.20V(100%)로 실리콘 하드웨어에 고정되어 있으며, I2C/SMBus 같은 전압 제어 레지스터가 존재하지 않습니다. MCU는 케이블 유입 전원을 직접 차단할 수 있는 스위칭 MOSFET이 없어 펌웨어로 80% 충전 중단을 걸 수 없습니다. 따라서 실시간 텔레메트리(13 4A 패킷)로 80% 도달을 감지하여 알림과 사운드를 발생시키고 케이블을 분리하도록 안내하는 것이 가장 안전하고 완벽한 배터리 수명 보호 방식입니다.")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(6)
+                        .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
                     }
                 }
                 .padding(8)

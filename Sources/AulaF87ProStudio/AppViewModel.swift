@@ -139,65 +139,15 @@ final class AppViewModel: ObservableObject {
     @Published var isAlDenteTriggered: Bool = false
     private var lastAlDenteAlertTime: Date?
 
-    // Charging Override State (Auto / Force Charging / Force Discharging)
-    @Published var chargingOverrideMode: ChargingOverrideMode = {
-        if let raw = UserDefaults.standard.string(forKey: "chargingOverrideMode"),
-           let mode = ChargingOverrideMode(rawValue: raw) {
-            return mode
-        }
-        return .auto
-    }() {
-        didSet {
-            UserDefaults.standard.set(chargingOverrideMode.rawValue, forKey: "chargingOverrideMode")
-            updateEffectiveBattery()
-        }
-    }
-
     var isEffectiveCharging: Bool {
-        switch chargingOverrideMode {
-        case .auto:
-            return (battery?.isCharging ?? false) || connectionMode.contains("USB")
-        case .forceCharging:
-            return true
-        case .forceDischarging:
-            return false
-        }
+        (battery?.isCharging ?? false) || connectionMode.contains("USB")
     }
 
     var effectiveBattery: BatteryStatus {
-        let rawPct = battery?.percent ?? 49
-        return BatteryStatus(percent: rawPct, isCharging: isEffectiveCharging, updatedAt: battery?.updatedAt ?? .now)
-    }
-
-    func toggleChargingOverride() {
-        if isEffectiveCharging {
-            chargingOverrideMode = .forceDischarging
-            showToast("충전 모드: 미충전 (무선 배터리 구동)으로 전환되었습니다.")
-        } else {
-            chargingOverrideMode = .forceCharging
-            showToast("충전 모드: 충전 중 ⚡ (케이블 연결됨)으로 지정되었습니다.")
-        }
-    }
-
-    func setChargingMode(_ mode: ChargingOverrideMode) {
-        chargingOverrideMode = mode
-        showToast("충전 모드: \(mode.rawValue)")
-    }
-
-    func setManualBatteryPercent(_ percent: Int) {
-        let clamped = max(1, min(100, percent))
-        let newBat = BatteryStatus(percent: clamped, isCharging: isEffectiveCharging, updatedAt: .now)
-        self.battery = newBat
-        self.hidService.updateCachedBattery(newBat)
-        self.checkAlDenteNotification()
-        self.showToast("배터리 잔량이 \(clamped)%로 보정되었습니다.")
-    }
-
-    private func updateEffectiveBattery() {
         if let b = battery {
-            battery = b.withCharging(isEffectiveCharging)
+            return BatteryStatus(percent: b.percent, isCharging: isEffectiveCharging, updatedAt: b.updatedAt)
         }
-        checkAlDenteNotification()
+        return BatteryStatus(percent: 84, isCharging: isEffectiveCharging, updatedAt: .now)
     }
 
     // Keystroke & Reactive Typing Tracking
@@ -271,8 +221,7 @@ final class AppViewModel: ObservableObject {
             lightBarMode: lightBarMode,
             isWiredUSB: connectionMode.contains("USB"),
             isActivelyTyping: isTypingNow,
-            typingSpeedCPM: typingSpeedCPM,
-            chargingMode: chargingOverrideMode
+            typingSpeedCPM: typingSpeedCPM
         )
     }
 
@@ -631,15 +580,9 @@ final class AppViewModel: ObservableObject {
 
         if let bat {
             let isWired = connectionMode.contains("USB")
-            let chg: Bool
-            switch chargingOverrideMode {
-            case .auto: chg = bat.isCharging || isWired
-            case .forceCharging: chg = true
-            case .forceDischarging: chg = false
-            }
-            self.battery = BatteryStatus(percent: bat.percent, isCharging: chg, updatedAt: .now)
+            self.battery = BatteryStatus(percent: bat.percent, isCharging: bat.isCharging || isWired, updatedAt: .now)
         } else if connectionMode.contains("USB"), let current = self.battery {
-            self.battery = BatteryStatus(percent: current.percent, isCharging: isEffectiveCharging, updatedAt: .now)
+            self.battery = BatteryStatus(percent: current.percent, isCharging: true, updatedAt: .now)
         }
         self.latencyStats = LatencyStats(
             currentRttMs: rtt,
@@ -672,13 +615,7 @@ final class AppViewModel: ObservableObject {
         modelName = snap.modelName
         if let bat = snap.battery {
             let isWired = snap.connectionMode.contains("USB")
-            let chg: Bool
-            switch chargingOverrideMode {
-            case .auto: chg = bat.isCharging || isWired
-            case .forceCharging: chg = true
-            case .forceDischarging: chg = false
-            }
-            battery = BatteryStatus(percent: bat.percent, isCharging: chg, updatedAt: .now)
+            battery = BatteryStatus(percent: bat.percent, isCharging: bat.isCharging || isWired, updatedAt: .now)
         }
         selectedEffect = snap.effect
         brightness = snap.brightness
