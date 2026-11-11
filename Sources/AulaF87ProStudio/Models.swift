@@ -558,6 +558,20 @@ struct StoredProfile: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+struct LatencyStats: Equatable, Sendable {
+    let currentRttMs: Double       // Hardware round-trip ping time (ms)
+    let effectiveInputMs: Double   // Estimated one-way input delay (ms)
+    let minMs: Double
+    let avgMs: Double
+    let maxMs: Double
+    let jitterMs: Double           // Standard deviation
+    let pollingRateHz: Int         // 1000Hz or 133Hz
+    let connectionKind: String     // Mode description
+    let sampleCount: Int
+    let history: [Double]          // Recent ping samples
+    let updatedAt: Date
+}
+
 struct BatteryStatus: Equatable, Sendable {
     let percent: Int // 1..100
     let isCharging: Bool

@@ -213,6 +213,24 @@ struct ContentView: View {
                 .background(Capsule().fill(Color.primary.opacity(0.06)))
             }
 
+            if let lat = vm.latencyStats {
+                Divider().frame(height: 22)
+                HStack(spacing: 6) {
+                    Image(systemName: "speedometer")
+                        .font(.system(size: 13))
+                        .foregroundStyle(lat.currentRttMs < 3.0 ? Color.green : (lat.currentRttMs < 10.0 ? Color.cyan : Color.orange))
+                    Text("\(String(format: "%.1f", lat.currentRttMs)) ms")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(lat.currentRttMs < 3.0 ? Color.green : (lat.currentRttMs < 10.0 ? Color.cyan : Color.orange))
+                    Text("(\(lat.pollingRateHz)Hz)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.primary.opacity(0.06)))
+            }
+
             Spacer()
 
             if vm.isBusy {
@@ -1506,6 +1524,114 @@ struct ContentView: View {
                 .padding(8)
             }
 
+            // Real-Time Hardware Latency & Polling Rate Benchmark Card
+            GroupBox {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Label("실시간 하드웨어 연결 레이턴시 & 폴링레이트", systemImage: "speedometer")
+                            .font(.headline)
+
+                        if let lat = vm.latencyStats {
+                            HStack(spacing: 5) {
+                                Circle()
+                                    .fill(lat.currentRttMs < 3.0 ? Color.green : (lat.currentRttMs < 10.0 ? Color.cyan : Color.orange))
+                                    .frame(width: 7, height: 7)
+                                Text(lat.connectionKind)
+                                    .font(.caption.bold())
+                                    .foregroundStyle(lat.currentRttMs < 3.0 ? Color.green : (lat.currentRttMs < 10.0 ? Color.cyan : Color.orange))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill((lat.currentRttMs < 3.0 ? Color.green : (lat.currentRttMs < 10.0 ? Color.cyan : Color.orange)).opacity(0.12)))
+                        }
+
+                        Spacer()
+
+                        Button {
+                            vm.runLatencyBenchmarkBurst()
+                        } label: {
+                            Label("10회 벤치마크 연속 측정", systemImage: "bolt.horizontal.fill")
+                                .font(.caption2.bold())
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.cyan)
+                        .controlSize(.small)
+                        .disabled(vm.isBusy)
+                    }
+
+                    if let lat = vm.latencyStats {
+                        // 4 KPI Subcards
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 12)], spacing: 12) {
+                            latencyMetricCard(
+                                title: "실시간 왕복 핑 (RTT)",
+                                value: "\(String(format: "%.2f", lat.currentRttMs)) ms",
+                                subtitle: "Mac ↔ 키보드 양방향 왕복 지연",
+                                color: lat.currentRttMs < 3.0 ? .green : (lat.currentRttMs < 10.0 ? .cyan : .orange)
+                            )
+                            latencyMetricCard(
+                                title: "실효 타건 입력 지연",
+                                value: "\(String(format: "%.2f", lat.effectiveInputMs)) ms",
+                                subtitle: "1-Way 하드웨어 단방향 전송 (0.001초대)",
+                                color: .cyan
+                            )
+                            latencyMetricCard(
+                                title: "평균 / 지터 (Jitter)",
+                                value: "\(String(format: "%.2f", lat.avgMs)) ms",
+                                subtitle: "편차 ±\(String(format: "%.2f", lat.jitterMs)) ms (안정성)",
+                                color: .purple
+                            )
+                            latencyMetricCard(
+                                title: "최저 / 최고 지연",
+                                value: "\(String(format: "%.1f", lat.minMs)) / \(String(format: "%.1f", lat.maxMs)) ms",
+                                subtitle: "\(lat.sampleCount)개 표본 실시간 통계",
+                                color: .primary
+                            )
+                        }
+
+                        // Connection Mode Comparison Bar
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("연결 방식별 레이턴시 & 폴링레이트 스펙 비교")
+                                .font(.caption.bold())
+                                .foregroundStyle(.secondary)
+
+                            HStack(spacing: 10) {
+                                comparisonModePill(
+                                    title: "USB 유선",
+                                    speed: "~0.8 ms",
+                                    rate: "1,000 Hz",
+                                    tag: "eSports 공식 경기",
+                                    isCurrent: vm.connectionMode.contains("USB")
+                                )
+                                comparisonModePill(
+                                    title: "2.4GHz 무선",
+                                    speed: "~2.1 ms",
+                                    rate: "1,000 Hz",
+                                    tag: "초고속 게이밍 무선",
+                                    isCurrent: vm.connectionMode.contains("2.4GHz")
+                                )
+                                comparisonModePill(
+                                    title: "Bluetooth 5.0",
+                                    speed: "~11.2 ms",
+                                    rate: "133 Hz",
+                                    tag: "저전력 장시간 사무",
+                                    isCurrent: vm.connectionMode.contains("Bluetooth")
+                                )
+                            }
+                        }
+                    } else {
+                        HStack {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("실시간 레이턴시 측정 중…")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 8)
+                    }
+                }
+                .padding(8)
+            }
+
             // 2. Power Breakdown & Battery Life Simulation
             HStack(alignment: .top, spacing: 16) {
                 // Left: Component-by-Component Power Breakdown
@@ -1726,6 +1852,58 @@ struct ContentView: View {
         case 15..<30: return "battery.25percent"
         default: return "battery.0percent"
         }
+    }
+
+    private func latencyMetricCard(title: String, value: String, subtitle: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 20, weight: .bold, design: .rounded))
+                .foregroundStyle(color)
+            Text(subtitle)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+    }
+
+    private func comparisonModePill(title: String, speed: String, rate: String, tag: String, isCurrent: Bool) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(isCurrent ? Color.green : Color.primary.opacity(0.18))
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(title)
+                        .font(.caption.bold())
+                        .foregroundStyle(isCurrent ? Color.green : Color.primary)
+                    if isCurrent {
+                        Text("(현재 연결)")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Color.green)
+                    }
+                }
+                Text("\(speed) · \(rate) (\(tag))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(isCurrent ? Color.green.opacity(0.10) : Color.primary.opacity(0.03))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(isCurrent ? Color.green.opacity(0.3) : Color.clear, lineWidth: 1)
+                )
+        )
     }
 
     private func batteryColor(for bat: BatteryStatus) -> Color {

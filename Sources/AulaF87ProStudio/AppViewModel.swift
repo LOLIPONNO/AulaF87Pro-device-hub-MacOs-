@@ -93,6 +93,10 @@ final class AppViewModel: ObservableObject {
     @Published var logs: [String] = []
     @Published var lastTelemetryUpdate: Date = .now
 
+    // Real-time Hardware Latency & Polling Rate Tracking
+    @Published var latencyStats: LatencyStats?
+    private var latencyHistory: [Double] = []
+
     // User-configurable Telemetry Refresh Interval (0.5s ~ 5.0s)
     @Published var refreshInterval: Double = {
         let saved = UserDefaults.standard.double(forKey: "telemetryRefreshInterval")
@@ -411,10 +415,9 @@ final class AppViewModel: ObservableObject {
                                 }
                             }
                         }
-                    } else if let bat = service.pollBattery() {
+                    } else if let outcome = service.pollBatteryAndLatency() {
                         DispatchQueue.main.async {
-                            self?.battery = bat
-                            self?.checkAlDenteNotification()
+                            self?.recordLatencyMeasurements(samples: [outcome.latencyMs], bat: outcome.bat)
                         }
                     }
                 }
@@ -432,14 +435,85 @@ final class AppViewModel: ObservableObject {
                     self?.isPollingHID = false
                 }
             }
-            if let bat = self.hidService.pollBattery() {
+            if let outcome = self.hidService.pollBatteryAndLatency() {
                 DispatchQueue.main.async {
-                    self.battery = bat
-                    self.lastTelemetryUpdate = .now
-                    self.checkAlDenteNotification()
-                    self.showToast("실시간 배터리 및 전력 정보 갱신 완료 (\(bat.percent)%)")
+                    let toast = "실시간 갱신 완료: \(String(format: "%.1f", outcome.latencyMs))ms 핑 · 배터리 \(outcome.bat?.percent ?? self.battery?.percent ?? 0)%"
+                    self.recordLatencyMeasurements(samples: [outcome.latencyMs], bat: outcome.bat, toastMessage: toast)
                 }
             }
+        }
+    }
+
+    func runLatencyBenchmarkBurst() {
+        guard !isBusy, !isPollingHID else { return }
+        isPollingHID = true
+        showToast("실시간 10회 레이턴시 벤치마크 측정 중…")
+        hidQueue.async { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.isPollingHID = false
+                }
+            }
+            var burstSamples: [Double] = []
+            for _ in 0..<10 {
+                if let res = self.hidService.pollBatteryAndLatency() {
+                    burstSamples.append(res.latencyMs)
+                }
+                Thread.sleep(forTimeInterval: 0.015)
+            }
+            if !burstSamples.isEmpty {
+                DispatchQueue.main.async {
+                    let avg = burstSamples.reduce(0, +) / Double(burstSamples.count)
+                    let minV = burstSamples.min() ?? 0
+                    let toast = "벤치마크 완료: 평균 \(String(format: "%.2f", avg))ms (최저 \(String(format: "%.2f", minV))ms)"
+                    self.recordLatencyMeasurements(samples: burstSamples, bat: nil, toastMessage: toast)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func recordLatencyMeasurements(samples: [Double], bat: BatteryStatus?, toastMessage: String? = nil) {
+        for s in samples {
+            latencyHistory.append(s)
+        }
+        if latencyHistory.count > 30 {
+            latencyHistory.removeFirst(latencyHistory.count - 30)
+        }
+        guard let rtt = samples.last ?? latencyHistory.last else { return }
+        let minMs = latencyHistory.min() ?? rtt
+        let maxMs = latencyHistory.max() ?? rtt
+        let avgMs = latencyHistory.reduce(0, +) / Double(latencyHistory.count)
+        let variance = latencyHistory.map { pow($0 - avgMs, 2) }.reduce(0, +) / Double(latencyHistory.count)
+        let jitterMs = sqrt(variance)
+
+        let isWired = connectionMode.contains("USB")
+        let isBT = connectionMode.contains("Bluetooth")
+        let pollingRate = isBT ? 133 : 1000
+        let kindName = isWired ? "USB 유선 모드 (1,000Hz eSports)" : (isBT ? "Bluetooth 5.0 (133Hz 절전)" : "2.4GHz 무선 리시버 (1,000Hz 게이밍)")
+        let effectiveDelay = max(0.4, rtt * 0.5)
+
+        if let bat {
+            self.battery = bat
+        }
+        self.latencyStats = LatencyStats(
+            currentRttMs: rtt,
+            effectiveInputMs: effectiveDelay,
+            minMs: minMs,
+            avgMs: avgMs,
+            maxMs: maxMs,
+            jitterMs: jitterMs,
+            pollingRateHz: pollingRate,
+            connectionKind: kindName,
+            sampleCount: latencyHistory.count,
+            history: latencyHistory,
+            updatedAt: .now
+        )
+        self.lastTelemetryUpdate = .now
+        self.checkAlDenteNotification()
+        if let toastMessage {
+            self.showToast(toastMessage)
         }
     }
 
