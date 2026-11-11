@@ -1,0 +1,916 @@
+import AppKit
+import Foundation
+import SwiftUI
+
+enum NavigationTab: String, CaseIterable, Identifiable {
+    case lighting = "키 백라이트 & 효과"
+    case perKey = "개별 키 RGB 페인터"
+    case sideLight = "측면 조명 & 라이트바"
+    case keymap = "키 매핑 & FN 레이어"
+    case music = "뮤직 싱크 (오디오 댄스)"
+    case performance = "성능 · 전원 · 백업"
+    case profiles = "프로필 보관함"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .lighting: return "sparkles"
+        case .perKey: return "paintbrush.pointed.fill"
+        case .sideLight: return "light.strip.2"
+        case .keymap: return "keyboard.fill"
+        case .music: return "waveform.badge.mic"
+        case .performance: return "gauge.with.dots.needle.67percent"
+        case .profiles: return "square.stack.3d.up.fill"
+        }
+    }
+}
+
+@MainActor
+final class AppViewModel: ObservableObject {
+    @Published var currentTab: NavigationTab = .lighting
+    @Published var isConnected = false
+    @Published var isBusy = false
+    @Published var statusTitle = "키보드 검색 중…"
+    @Published var statusDetail: String?
+    @Published var connectionMode = "연결 대기 중"
+    @Published var modelName = "AULA F87 Pro V1"
+    @Published var battery: BatteryStatus?
+
+    // Lighting & Effect state
+    @Published var selectedEffect: Int = 11
+    @Published var brightness: Int = 4
+    @Published var speed: Int = 3
+    @Published var colorful: Bool = true
+    @Published var selectedColor: RGBColor = .cyan
+    @Published var sideLightMode: Int = 1
+    @Published var lightBarMode: Int = 1
+
+    // Performance & Power state
+    @Published var sleepRawSteps: Int = 10 // 5 min
+    @Published var debounceStage: Int = 3 // 3ms
+    @Published var tapSensitivity: Int = 0
+
+    // Per-Key RGB state
+    @Published var perKeyColors: [Int: RGBColor] = [:]
+    @Published var perKeyTool: PerKeyTool = .paint
+    @Published var selectedLEDs: Set<Int> = []
+    @Published var gradientEndColor: RGBColor = .neonPurple
+    @Published var gradientDirection: GradientDirection = .horizontal
+    @Published private(set) var canUndo = false
+    @Published private(set) var canRedo = false
+
+    // Key Matrix Remapping state
+    @Published var selectedMatrixLayer: Int = 0
+    @Published var matrixLayers: [Int: [UInt8]] = [:]
+    @Published var selectedKeyForRemap: KeyboardKey = F87Layout.allKeys[0]
+    @Published var selectedRemapCategory: String = "추천 / Mac & 한국어"
+    @Published var customComboMods: UInt8 = 0
+    @Published var customComboKey: UInt8 = 0x04
+
+    // Music Reactive state
+    @Published private(set) var isMusicSyncActive = false
+    @Published var musicDemoMode = true
+    @Published var musicSensitivity: Double = 1.35
+    @Published var musicColorMode: Int = 0 // 0 = Rainbow Meter, 1 = Custom Color
+    @Published private(set) var audioLevels: [Double] = Array(repeating: 0, count: 11)
+    @Published var micPermissionGranted: Bool = (MusicVisualizer.currentPermissionStatus() == .authorized)
+    @Published var micStatusText: String = {
+        switch MusicVisualizer.currentPermissionStatus() {
+        case .authorized: return "마이크 권한 승인됨"
+        case .notDetermined: return "마이크 권한 요청 전"
+        case .denied, .restricted: return "마이크 권한 거부됨 (시스템 설정에서 허용 필요)"
+        @unknown default: return "마이크 상태 확인 필요"
+        }
+    }()
+
+    // Profiles & Logs
+    @Published var profiles: [StoredProfile] = []
+    @Published var toastMessage: String?
+    @Published var logs: [String] = []
+
+    private var undoStack: [[Int: RGBColor]] = []
+    private var redoStack: [[Int: RGBColor]] = []
+    private let hidService = HIDService()
+    private let hidQueue = DispatchQueue(label: "com.antigravity.aulaf87pro.hid", qos: .userInitiated)
+    private let musicVisualizer = MusicVisualizer()
+    private var audioStreamFrameInFlight = false
+    private var batteryTimer: Timer?
+
+    private let profilesURL: URL = {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = appSupport.appendingPathComponent("AulaF87ProStudio", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("profiles.json")
+    }()
+
+    init() {
+        perKeyColors = hidService.loadPerKeyCache()
+        loadProfilesFromDisk()
+        if !CommandLine.arguments.contains("--probe") {
+            connectKeyboard()
+            startBatteryPolling()
+        }
+    }
+
+    var selectedEffectInfo: LightingEffect {
+        LightingEffect.info(for: selectedEffect)
+    }
+
+    // MARK: - Connection & Sync
+
+    func connectKeyboard() {
+        guard !isBusy else { return }
+        stopMusicSyncIfNeeded()
+        isBusy = true
+        statusTitle = "키보드 연결 중…"
+        log("AULA F87 Pro 제어 인터페이스 검색 중…")
+
+        let service = hidService
+        hidQueue.async { [weak self] in
+            do {
+                let snap = try service.connectAndReadSnapshot()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.isConnected = true
+                    self.applySnapshotToUI(snap)
+                    self.statusTitle = "\(snap.modelName) 연결됨"
+                    self.statusDetail = nil
+                    self.log("연결 성공: \(snap.modelName) (\(snap.connectionMode))")
+                    self.showToast("키보드 설정을 불러왔습니다")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.isConnected = false
+                    self.statusTitle = "연결되지 않음"
+                    self.statusDetail = error.localizedDescription
+                    self.log("연결 실패: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func refreshFromHardware() {
+        guard !isBusy else { return }
+        stopMusicSyncIfNeeded()
+        isBusy = true
+        statusTitle = "키보드 상태 읽는 중…"
+
+        let service = hidService
+        hidQueue.async { [weak self] in
+            do {
+                let snap = try service.refreshSnapshot()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.isConnected = true
+                    self.applySnapshotToUI(snap)
+                    self.statusTitle = "\(snap.modelName) 연결됨"
+                    self.statusDetail = nil
+                    self.log("하드웨어 상태 새로고침 완료 (효과 #\(snap.effect), 밝기 \(snap.brightness), 속도 \(snap.speed))")
+                    self.showToast("현재 키보드 설정을 동기화했습니다")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.isConnected = false
+                    self.statusTitle = "통신 오류"
+                    self.statusDetail = error.localizedDescription
+                    self.log("새로고침 오류: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    private func startBatteryPolling() {
+        batteryTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.isBusy, !self.isMusicSyncActive else { return }
+                let service = self.hidService
+                let shouldTryUpgrade = !self.isConnected || self.connectionMode.contains("Bluetooth")
+                self.hidQueue.async {
+                    if shouldTryUpgrade {
+                        if let snap = try? service.connectAndReadSnapshot() {
+                            DispatchQueue.main.async {
+                                let changedMode = (self.connectionMode != snap.connectionMode) || !self.isConnected
+                                self.isConnected = true
+                                self.applySnapshotToUI(snap)
+                                self.statusTitle = "\(snap.modelName) 연결됨"
+                                self.statusDetail = nil
+                                if changedMode {
+                                    self.log("자동 연결 감지: \(snap.modelName) (\(snap.connectionMode))")
+                                    self.showToast("\(snap.connectionMode) 연결됨")
+                                }
+                            }
+                        }
+                    } else if let bat = service.pollBattery() {
+                        DispatchQueue.main.async {
+                            self.battery = bat
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    func openInputMonitoringSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private func applySnapshotToUI(_ snap: HardwareSnapshot) {
+        connectionMode = snap.connectionMode
+        modelName = snap.modelName
+        if let bat = snap.battery {
+            battery = bat
+        }
+        selectedEffect = snap.effect
+        brightness = snap.brightness
+        speed = snap.speed
+        colorful = snap.colorful
+        sideLightMode = snap.sideLightMode
+        lightBarMode = snap.lightBarMode
+        sleepRawSteps = snap.sleepRawSteps
+        debounceStage = snap.debounceStage
+        tapSensitivity = snap.tapSensitivity
+    }
+
+    // MARK: - Lighting & Hardware Settings Apply
+
+    func applyLightingAndSettingsToHardware() {
+        guard !isBusy else { return }
+        stopMusicSyncIfNeeded()
+        isBusy = true
+        statusTitle = "키보드에 설정 저장 중…"
+
+        let eff = selectedEffect
+        let bri = brightness
+        let spd = speed
+        let colMode = colorful || !selectedEffectInfo.supportsColor
+        let col = selectedColor
+        let side = sideLightMode
+        let bar = lightBarMode
+        let slp = sleepRawSteps
+        let deb = debounceStage
+        let tap = tapSensitivity
+        let service = hidService
+
+        hidQueue.async { [weak self] in
+            do {
+                let snap = try service.applyLightingAndSettings(
+                    effect: eff,
+                    brightness: bri,
+                    speed: spd,
+                    colorful: colMode,
+                    customColor: col,
+                    sideLightMode: side,
+                    lightBarMode: bar,
+                    sleepRawSteps: slp,
+                    debounceStage: deb,
+                    tapSensitivity: tap
+                )
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.isConnected = true
+                    self.applySnapshotToUI(snap)
+                    self.statusTitle = "\(snap.modelName) 연결됨"
+                    self.statusDetail = nil
+                    self.log("설정 적용 완료: 효과=\(LightingEffect.info(for: eff).titleKo), 밝기=\(bri), 속도=\(spd), 측면=\(side), 디바운스=\(deb)단계")
+                    self.showToast("키보드에 설정이 저장되었습니다")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.statusTitle = "설정 저장 실패"
+                    self.statusDetail = error.localizedDescription
+                    self.log("설정 적용 실패: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Per-Key RGB Operations
+
+    func handleKeyClick(_ key: KeyboardKey) {
+        recordUndoState()
+        switch perKeyTool {
+        case .paint:
+            perKeyColors[key.led] = selectedColor
+        case .erase:
+            perKeyColors.removeValue(forKey: key.led)
+        case .eyedropper:
+            if let existing = perKeyColors[key.led] {
+                selectedColor = existing
+                perKeyTool = .paint
+            }
+        case .select:
+            if selectedLEDs.contains(key.led) {
+                selectedLEDs.remove(key.led)
+            } else {
+                selectedLEDs.insert(key.led)
+            }
+        }
+    }
+
+    func selectKeyGroup(_ group: String) {
+        switch group {
+        case "all":
+            selectedLEDs = Set(F87Layout.allKeys.map(\.led))
+        case "none":
+            selectedLEDs.removeAll()
+        case "wasd":
+            selectedLEDs = [14, 9, 15, 21] // W, A, S, D
+        case "arrows":
+            selectedLEDs = [94, 95, 89, 101] // Up, Down, Left, Right
+        case "fkeys":
+            selectedLEDs = [12, 18, 24, 30, 36, 42, 48, 54, 60, 66, 72, 78]
+        case "numbers":
+            selectedLEDs = [7, 13, 19, 25, 31, 37, 43, 49, 55, 61]
+        case "modifiers":
+            selectedLEDs = [0, 2, 3, 4, 5, 11, 17, 53, 59, 65, 83, 82, 81, 79]
+        default:
+            break
+        }
+    }
+
+    func fillTargetKeysWithSelectedColor() {
+        recordUndoState()
+        let targets = selectedLEDs.isEmpty ? Set(F87Layout.allKeys.map(\.led)) : selectedLEDs
+        for led in targets {
+            perKeyColors[led] = selectedColor
+        }
+    }
+
+    func clearTargetKeys() {
+        recordUndoState()
+        if selectedLEDs.isEmpty {
+            perKeyColors.removeAll()
+        } else {
+            for led in selectedLEDs {
+                perKeyColors.removeValue(forKey: led)
+            }
+        }
+    }
+
+    func applyPresetWASDGaming() {
+        recordUndoState()
+        let highlight: Set<Int> = [14, 9, 15, 21, 94, 95, 89, 101, 0, 35]
+        let hot = RGBColor(red: 255, green: 50, blue: 80)
+        let base = RGBColor(red: 15, green: 90, blue: 165)
+        for key in F87Layout.allKeys {
+            perKeyColors[key.led] = highlight.contains(key.led) ? hot : base
+        }
+    }
+
+    func applyPresetRainbowSpectrum() {
+        recordUndoState()
+        let keys = F87Layout.allKeys
+        for (idx, key) in keys.enumerated() {
+            let hue = Double(idx) / Double(max(1, keys.count))
+            perKeyColors[key.led] = RGBColor(color: Color(hue: hue, saturation: 0.9, brightness: 1.0))
+        }
+    }
+
+    func applyPresetRowWaves() {
+        recordUndoState()
+        let hues: [Double] = [0.55, 0.46, 0.34, 0.14, 0.03, 0.82]
+        for (rowIdx, row) in F87Layout.rows.enumerated() {
+            let rowColor = RGBColor(color: Color(hue: hues[rowIdx % hues.count], saturation: 0.88, brightness: 1.0))
+            for item in row {
+                if case let .key(k) = item {
+                    perKeyColors[k.led] = rowColor
+                }
+            }
+        }
+    }
+
+    func applyGradientToPerKey() {
+        recordUndoState()
+        let targets = selectedLEDs.isEmpty ? Set(F87Layout.allKeys.map(\.led)) : selectedLEDs
+        let rowCount = max(1, F87Layout.rows.count - 1)
+        for (rIdx, row) in F87Layout.rows.enumerated() {
+            let keysInRow = row.compactMap { item -> KeyboardKey? in
+                if case let .key(k) = item { return k }
+                return nil
+            }
+            let colCount = max(1, keysInRow.count - 1)
+            for (cIdx, key) in keysInRow.enumerated() where targets.contains(key.led) {
+                let nx = Double(cIdx) / Double(colCount)
+                let ny = Double(rIdx) / Double(rowCount)
+                let t: Double
+                switch gradientDirection {
+                case .horizontal: t = nx
+                case .vertical: t = ny
+                case .radial: t = min(1.0, hypot(nx - 0.5, ny - 0.5) * 1.7)
+                }
+                let r = UInt8(clamping: Int((Double(selectedColor.red) * (1 - t) + Double(gradientEndColor.red) * t).rounded()))
+                let g = UInt8(clamping: Int((Double(selectedColor.green) * (1 - t) + Double(gradientEndColor.green) * t).rounded()))
+                let b = UInt8(clamping: Int((Double(selectedColor.blue) * (1 - t) + Double(gradientEndColor.blue) * t).rounded()))
+                perKeyColors[key.led] = RGBColor(red: r, green: g, blue: b)
+            }
+        }
+    }
+
+    func undoPerKey() {
+        guard let prev = undoStack.popLast() else { return }
+        redoStack.append(perKeyColors)
+        perKeyColors = prev
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    func redoPerKey() {
+        guard let next = redoStack.popLast() else { return }
+        undoStack.append(perKeyColors)
+        perKeyColors = next
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    private func recordUndoState() {
+        undoStack.append(perKeyColors)
+        if undoStack.count > 30 { undoStack.removeFirst() }
+        redoStack.removeAll()
+        canUndo = !undoStack.isEmpty
+        canRedo = false
+    }
+
+    func applyPerKeyToHardware() {
+        guard !isBusy else { return }
+        stopMusicSyncIfNeeded()
+        isBusy = true
+        statusTitle = "개별 키 RGB 맵 전송 중…"
+
+        let colors = perKeyColors
+        let bri = max(1, brightness)
+        let side = sideLightMode
+        let service = hidService
+
+        hidQueue.async { [weak self] in
+            do {
+                let snap = try service.applyPerKeyColors(colors: colors, brightness: bri, sideLightMode: side)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.isConnected = true
+                    self.applySnapshotToUI(snap)
+                    self.statusTitle = "\(snap.modelName) 연결됨"
+                    self.statusDetail = nil
+                    self.log("개별 키 RGB (\(colors.count)개 키) 저장 완료 (F87 Pro Custom Mode #18 활성화)")
+                    self.showToast("개별 키 RGB 색상이 키보드에 저장되었습니다")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.statusTitle = "개별 키 저장 실패"
+                    self.statusDetail = error.localizedDescription
+                    self.log("개별 키 RGB 저장 오류: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Key Matrix Remapping (Layers 0..2)
+
+    func loadMatrixLayer(_ layer: Int) {
+        guard !isBusy else { return }
+        stopMusicSyncIfNeeded()
+        isBusy = true
+        statusTitle = "레이어 \(layer) 키 매트릭스 읽는 중…"
+
+        let service = hidService
+        hidQueue.async { [weak self] in
+            do {
+                let data = try service.readKeyMatrix(layer: layer)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.matrixLayers[layer] = data
+                    self.statusTitle = "\(self.modelName) 연결됨"
+                    self.log("레이어 \(layer) 키 매핑 데이터 로드 완료 (504 바이트)")
+                    self.showToast("레이어 \(layer) 키 매핑을 불러왔습니다")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.statusTitle = "키 매트릭스 읽기 실패"
+                    self.statusDetail = error.localizedDescription
+                    self.log("레이어 \(layer) 읽기 실패: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    func currentSlotBytes(for led: Int, in layer: Int) -> [UInt8] {
+        guard let matrix = matrixLayers[layer],
+              (0..<126).contains(led),
+              matrix.count >= (led + 1) * 4 else {
+            return [0, 0, 0, 0]
+        }
+        let start = led * 4
+        return Array(matrix[start..<(start + 4)])
+    }
+
+    func assignBytesToSelectedKey(_ bytes: [UInt8]) {
+        guard bytes.count == 4 else { return }
+        let slot = selectedKeyForRemap.led
+        if selectedMatrixLayer == 0 && slot == 59 {
+            showToast("안전 보호: 기본 레이어의 Fn 키는 변경할 수 없습니다")
+            return
+        }
+        guard var matrix = matrixLayers[selectedMatrixLayer] else {
+            showToast("먼저 '현재 레이어 불러오기'를 눌러주세요")
+            return
+        }
+        let start = slot * 4
+        for i in 0..<4 {
+            matrix[start + i] = bytes[i]
+        }
+        matrixLayers[selectedMatrixLayer] = matrix
+        log("레이어 \(selectedMatrixLayer) [\(selectedKeyForRemap.label)] → \(KeymapCatalog.describe(bytes)) 지정됨")
+    }
+
+    func applyMacCommandOptionSwapPreset() {
+        guard var matrix = matrixLayers[0] else {
+            showToast("먼저 기본 레이어(Layer 0)를 불러와주세요")
+            return
+        }
+        // LWin (slot 11) <-> LAlt (slot 17)
+        // Set LWin(11) = LAlt(00 04 00 00), LAlt(17) = LWin/Cmd(00 08 00 00)
+        let lwinOffset = 11 * 4
+        let laltOffset = 17 * 4
+        matrix.replaceSubrange(lwinOffset..<(lwinOffset + 4), with: [0x00, 0x04, 0x00, 0x00])
+        matrix.replaceSubrange(laltOffset..<(laltOffset + 4), with: [0x00, 0x08, 0x00, 0x00])
+        matrixLayers[0] = matrix
+        showToast("LWin ↔ LAlt (Mac ⌘/⌥ 위치) 교환 프리셋이 적용되었습니다. '키보드에 레이어 저장'을 눌러 확정하세요.")
+    }
+
+    func applyRightAltToHangulPreset() {
+        guard var matrix = matrixLayers[0] else {
+            showToast("먼저 기본 레이어(Layer 0)를 불러와주세요")
+            return
+        }
+        // RAlt (slot 53) -> 한/영 (00 00 00 90)
+        let raltOffset = 53 * 4
+        matrix.replaceSubrange(raltOffset..<(raltOffset + 4), with: [0x00, 0x00, 0x00, 0x90])
+        matrixLayers[0] = matrix
+        showToast("오른쪽 Alt(RAlt) 키가 '한/영 전환(0x90)'으로 설정되었습니다. '키보드에 레이어 저장'을 눌러 확정하세요.")
+    }
+
+    func saveCurrentMatrixLayerToHardware() {
+        let layer = selectedMatrixLayer
+        guard let matrix = matrixLayers[layer] else {
+            showToast("저장할 레이어 데이터가 없습니다. 먼저 레이어를 불러와주세요.")
+            return
+        }
+        guard !isBusy else { return }
+        stopMusicSyncIfNeeded()
+        isBusy = true
+        statusTitle = "레이어 \(layer) 키 매핑 저장 중…"
+
+        let service = hidService
+        hidQueue.async { [weak self] in
+            do {
+                try service.writeKeyMatrix(layer: layer, matrix: matrix)
+                let verified = try service.readKeyMatrix(layer: layer)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.matrixLayers[layer] = verified
+                    self.statusTitle = "\(self.modelName) 연결됨"
+                    self.log("레이어 \(layer) 키 매트릭스 하드웨어 저장 및 검증 완료")
+                    self.showToast("레이어 \(layer) 키 매핑이 키보드에 저장되었습니다")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.statusTitle = "키 매핑 저장 실패"
+                    self.statusDetail = error.localizedDescription
+                    self.log("레이어 \(layer) 저장 오류: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Music Sync (Audio Dance)
+
+    func refreshMicPermissionState() {
+        let status = MusicVisualizer.currentPermissionStatus()
+        micPermissionGranted = (status == .authorized)
+        switch status {
+        case .authorized:
+            micStatusText = "마이크 권한 승인됨 (실시간 오디오 분석 가능)"
+        case .notDetermined:
+            micStatusText = "마이크 권한 미요청 (선택 시 권한 팝업 표시)"
+        case .denied, .restricted:
+            micStatusText = "마이크 권한 거부됨 (시스템 설정 > 마이크에서 허용 필요)"
+        @unknown default:
+            micStatusText = "마이크 상태 확인 필요"
+        }
+    }
+
+    func requestMicPermissionNow() {
+        Task { @MainActor in
+            let granted = await MusicVisualizer.requestMicrophonePermission()
+            refreshMicPermissionState()
+            if granted {
+                showToast("마이크 입력 권한이 확인되었습니다")
+                if isMusicSyncActive && !musicDemoMode {
+                    startLiveMicrophoneCapture()
+                }
+            } else {
+                showToast("마이크 권한이 거부되었습니다. 시스템 설정 > 마이크에서 허용해주세요.")
+            }
+        }
+    }
+
+    func openMicrophoneSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func handleMusicModeChanged() {
+        // Immediately stop any previous wave and reset bars to 0 so demo never bleeds into mic mode
+        musicVisualizer.stop()
+        audioLevels = Array(repeating: 0, count: 11)
+
+        if !musicDemoMode {
+            // User selected Real-Time Microphone mode -> check/request permission right away
+            Task { @MainActor in
+                let granted = await MusicVisualizer.requestMicrophonePermission()
+                refreshMicPermissionState()
+                if isMusicSyncActive {
+                    if granted {
+                        startLiveMicrophoneCapture()
+                    } else {
+                        isMusicSyncActive = false
+                        log("마이크 권한이 없어 실시간 마이크 싱크를 시작할 수 없습니다.")
+                        showToast("마이크 접근 권한을 허용해주세요")
+                    }
+                }
+            }
+        } else if isMusicSyncActive {
+            let handler: ([Double]) -> Void = { [weak self] levels in
+                Task { @MainActor in
+                    self?.handleAudioLevels(levels)
+                }
+            }
+            musicVisualizer.startDemoWave(callback: handler)
+            log("뮤직 싱크 소스 전환: 내장 리듬 신디사이저 파형")
+            showToast("내장 신디사이저 모드로 전환되었습니다")
+        }
+    }
+
+    func toggleMusicSync() {
+        if isMusicSyncActive {
+            stopMusicSyncIfNeeded()
+            showToast("뮤직 싱크가 중지되었습니다")
+        } else {
+            startMusicSync()
+        }
+    }
+
+    private func startMusicSync() {
+        guard isConnected, !isBusy else {
+            showToast("먼저 키보드를 연결해주세요")
+            return
+        }
+        audioLevels = Array(repeating: 0, count: 11)
+
+        if musicDemoMode {
+            isMusicSyncActive = true
+            let handler: ([Double]) -> Void = { [weak self] levels in
+                Task { @MainActor in
+                    self?.handleAudioLevels(levels)
+                }
+            }
+            musicVisualizer.startDemoWave(callback: handler)
+            log("뮤직 싱크 시작 (내장 리듬 신디사이저 모드)")
+            showToast("내장 리듬 뮤직 싱크가 시작되었습니다")
+        } else {
+            Task { @MainActor in
+                let granted = await MusicVisualizer.requestMicrophonePermission()
+                refreshMicPermissionState()
+                guard granted else {
+                    isMusicSyncActive = false
+                    audioLevels = Array(repeating: 0, count: 11)
+                    log("마이크 입력 권한 거부됨: 시스템 설정 > 개인정보 보호 및 보안 > 마이크에서 권한을 허용해주세요.")
+                    showToast("마이크 권한이 필요합니다 (신디사이저로 대체하지 않음)")
+                    return
+                }
+                isMusicSyncActive = true
+                startLiveMicrophoneCapture()
+            }
+        }
+    }
+
+    private func startLiveMicrophoneCapture() {
+        let handler: ([Double]) -> Void = { [weak self] levels in
+            Task { @MainActor in
+                self?.handleAudioLevels(levels)
+            }
+        }
+        do {
+            try musicVisualizer.startMicrophone(callback: handler)
+            log("뮤직 싱크 시작 (실시간 마이크 오디오 입력 분석 중)")
+            showToast("실시간 마이크 입력 뮤직 싱크가 시작되었습니다")
+        } catch {
+            // Never silently fall back to demo wave! Stop cleanly and show the exact error.
+            musicVisualizer.stop()
+            isMusicSyncActive = false
+            audioLevels = Array(repeating: 0, count: 11)
+            log("실시간 마이크 시작 실패: \(error.localizedDescription)")
+            showToast("마이크 시작 실패: \(error.localizedDescription)")
+        }
+    }
+
+    func stopMusicSyncIfNeeded() {
+        guard isMusicSyncActive else { return }
+        musicVisualizer.stop()
+        isMusicSyncActive = false
+        audioLevels = Array(repeating: 0, count: 11)
+        let service = hidService
+        hidQueue.async {
+            service.stopLiveStream()
+        }
+    }
+
+    private func handleAudioLevels(_ rawLevels: [Double]) {
+        guard isMusicSyncActive else { return }
+        let scaled = rawLevels.map { min(1.0, max(0.0, $0 * musicSensitivity)) }
+        audioLevels = scaled
+
+        guard !audioStreamFrameInFlight else { return }
+        audioStreamFrameInFlight = true
+
+        var colors: [Int: RGBColor] = [:]
+        let meterPalette: [RGBColor] = [
+            RGBColor(red: 0, green: 240, blue: 160),
+            RGBColor(red: 0, green: 215, blue: 255),
+            RGBColor(red: 80, green: 130, blue: 255),
+            RGBColor(red: 190, green: 70, blue: 255),
+            RGBColor(red: 255, green: 50, blue: 140),
+            RGBColor(red: 255, green: 60, blue: 40)
+        ]
+
+        for (colIdx, columnLEDs) in F87Layout.audioColumns.enumerated() where colIdx < scaled.count {
+            let activeCount = Int((scaled[colIdx] * Double(columnLEDs.count)).rounded())
+            guard activeCount > 0 else { continue }
+            for i in 0..<min(activeCount, columnLEDs.count) {
+                let led = columnLEDs[i]
+                if musicColorMode == 0 {
+                    let tier = min(meterPalette.count - 1, (i * meterPalette.count) / max(1, columnLEDs.count))
+                    colors[led] = meterPalette[tier]
+                } else {
+                    colors[led] = selectedColor
+                }
+            }
+        }
+
+        let service = hidService
+        hidQueue.async { [weak self] in
+            try? service.streamLiveColors(colors)
+            DispatchQueue.main.async {
+                self?.audioStreamFrameInFlight = false
+            }
+        }
+    }
+
+    // MARK: - Factory Reset
+
+    func performFactoryReset() {
+        guard !isBusy else { return }
+        stopMusicSyncIfNeeded()
+        isBusy = true
+        statusTitle = "공장 초기화 진행 중…"
+
+        let service = hidService
+        hidQueue.async { [weak self] in
+            do {
+                let snap = try service.restoreFactoryDefaults()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.applySnapshotToUI(snap)
+                    self.statusTitle = "\(snap.modelName) 연결됨"
+                    self.log("공장 초기화 완료 (기본 네온 스트림 조명 및 5분 절전 복원)")
+                    self.showToast("키보드 설정이 공장 초기값으로 복원되었습니다")
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isBusy = false
+                    self.statusTitle = "초기화 실패"
+                    self.statusDetail = error.localizedDescription
+                    self.log("공장 초기화 실패: \(error.localizedDescription)")
+                }
+            }
+        }
+    }
+
+    // MARK: - Profiles Management
+
+    func saveCurrentAsProfile(name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalName = trimmed.isEmpty ? "내 프로필 \(profiles.count + 1)" : trimmed
+        let profile = F87Profile(
+            effect: selectedEffect,
+            brightness: brightness,
+            speed: speed,
+            colorful: colorful,
+            color: selectedColor,
+            sideLightMode: sideLightMode,
+            perKey: perKeyColors
+        )
+        profiles.insert(StoredProfile(name: finalName, profile: profile), at: 0)
+        saveProfilesToDisk()
+        showToast("'\(finalName)' 프로필이 저장되었습니다")
+    }
+
+    func applyStoredProfile(_ stored: StoredProfile) {
+        let p = stored.profile
+        selectedEffect = p.effect
+        brightness = p.brightness
+        speed = p.speed
+        colorful = p.colorful
+        selectedColor = p.color
+        sideLightMode = p.sideLightMode
+        if !p.perKey.isEmpty {
+            perKeyColors = p.perKey
+        }
+        if p.effect == LightingEffect.customPerKeyID && !p.perKey.isEmpty {
+            applyPerKeyToHardware()
+        } else {
+            applyLightingAndSettingsToHardware()
+        }
+    }
+
+    func deleteStoredProfile(_ id: UUID) {
+        profiles.removeAll { $0.id == id }
+        saveProfilesToDisk()
+    }
+
+    private func loadProfilesFromDisk() {
+        if let data = try? Data(contentsOf: profilesURL),
+           let decoded = try? JSONDecoder().decode([StoredProfile].self, from: data) {
+            profiles = decoded
+        } else {
+            // Seed starter profiles
+            profiles = [
+                StoredProfile(
+                    name: "사이버펑크 네온 스트림",
+                    profile: F87Profile(effect: 11, brightness: 4, speed: 3, colorful: true, color: .cyan, sideLightMode: 1, perKey: [:])
+                ),
+                StoredProfile(
+                    name: "아이스 시안 상시 점등",
+                    profile: F87Profile(effect: 1, brightness: 4, speed: 2, colorful: false, color: .cyan, sideLightMode: 3, perKey: [:])
+                ),
+                StoredProfile(
+                    name: "차분한 퍼플 숨쉬기",
+                    profile: F87Profile(effect: 2, brightness: 3, speed: 2, colorful: false, color: .neonPurple, sideLightMode: 4, perKey: [:])
+                )
+            ]
+        }
+    }
+
+    private func saveProfilesToDisk() {
+        if let data = try? JSONEncoder().encode(profiles) {
+            try? data.write(to: profilesURL, options: .atomic)
+        }
+    }
+
+    // MARK: - Helpers
+
+    func showToast(_ message: String) {
+        toastMessage = message
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            if self?.toastMessage == message {
+                self?.toastMessage = nil
+            }
+        }
+    }
+
+    func log(_ entry: String) {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss"
+        let line = "[\(formatter.string(from: .now))] \(entry)"
+        logs.insert(line, at: 0)
+        if logs.count > 100 {
+            logs.removeLast()
+        }
+        let logURL = profilesURL.deletingLastPathComponent().appendingPathComponent("runtime.log")
+        let body = logs.prefix(30).joined(separator: "\n")
+        try? body.write(to: logURL, atomically: true, encoding: .utf8)
+    }
+}
