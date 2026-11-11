@@ -28,6 +28,18 @@ private let hidReportCallback: IOHIDReportCallback = { context, result, sender, 
     collector.push(bytes)
 }
 
+private let hidDeviceMatchedCallback: IOHIDDeviceCallback = { context, result, sender, device in
+    guard let context else { return }
+    let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
+    service.handleDeviceMatched(device)
+}
+
+private let hidDeviceRemovalCallback: IOHIDDeviceCallback = { context, result, sender, device in
+    guard let context else { return }
+    let service = Unmanaged<HIDService>.fromOpaque(context).takeUnretainedValue()
+    service.handleDeviceRemoved(device)
+}
+
 final class HIDService: @unchecked Sendable {
     enum TransportKind {
         case wireless24G(IOHIDDevice)
@@ -43,6 +55,7 @@ final class HIDService: @unchecked Sendable {
     private(set) var cachedModelName: String = "AULA F87 Pro V1"
     private(set) var cachedBattery: BatteryStatus? = BatteryStatus(percent: 49, isCharging: false, updatedAt: .now)
     private(set) var lastMeasuredRttMs: Double = 2.1
+    var onDeviceStateChange: (@Sendable () -> Void)?
 
     private let backupDirectory: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -58,7 +71,7 @@ final class HIDService: @unchecked Sendable {
         reportBuffer.deallocate()
     }
 
-    func disconnect() {
+    func closeActiveDeviceOnly() {
         scheduleDepth = 0
         if let activeTransport {
             switch activeTransport {
@@ -69,26 +82,35 @@ final class HIDService: @unchecked Sendable {
             }
         }
         activeTransport = nil
-        if let manager {
-            IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+    }
+
+    func disconnect() {
+        closeActiveDeviceOnly()
+        if let mgr = manager {
+            IOHIDManagerUnscheduleFromRunLoop(mgr, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+            IOHIDManagerClose(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
             self.manager = nil
         }
     }
 
-    var isWireless: Bool {
-        if case .wireless24G = activeTransport { return true }
-        return false
+    func handleDeviceMatched(_ device: IOHIDDevice) {
+        onDeviceStateChange?()
     }
 
-    var isConnected: Bool {
-        activeTransport != nil
+    func handleDeviceRemoved(_ device: IOHIDDevice) {
+        if let activeTransport {
+            switch activeTransport {
+            case .wireless24G(let d), .wiredUSB(let d), .bluetoothLE(let d):
+                if CFEqual(d, device) {
+                    closeActiveDeviceOnly()
+                }
+            }
+        }
+        onDeviceStateChange?()
     }
 
-    // MARK: - Discovery & Connection
-
-    func connectAndReadSnapshot() throws -> HardwareSnapshot {
-        disconnect()
-
+    private func ensureManagerListening() {
+        guard manager == nil else { return }
         let mgr = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         self.manager = mgr
 
@@ -107,6 +129,28 @@ final class HIDService: @unchecked Sendable {
             ]
         ]
         IOHIDManagerSetDeviceMatchingMultiple(mgr, matchings as CFArray)
+        let ctx = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(mgr, hidDeviceMatchedCallback, ctx)
+        IOHIDManagerRegisterDeviceRemovalCallback(mgr, hidDeviceRemovalCallback, ctx)
+        IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerOpen(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
+    }
+
+    var isWireless: Bool {
+        if case .wireless24G = activeTransport { return true }
+        return false
+    }
+
+    var isConnected: Bool {
+        activeTransport != nil
+    }
+
+    // MARK: - Discovery & Connection
+
+    func connectAndReadSnapshot() throws -> HardwareSnapshot {
+        closeActiveDeviceOnly()
+        ensureManagerListening()
+        guard let mgr = manager else { throw F87ProtocolError.deviceNotFound }
 
         guard let cfSet = IOHIDManagerCopyDevices(mgr) else {
             throw F87ProtocolError.deviceNotFound
@@ -739,7 +783,7 @@ final class HIDService: @unchecked Sendable {
                     CFRunLoopRunInMode(.defaultMode, 0.015, true)
                     while !collector.packets.isEmpty {
                         let pkt = collector.packets.removeFirst()
-                        if pkt[1] == 0x44 && pkt[2] == 0x0A && pkt[3] < 10 && pkt[19] == F87Protocol.checksum20(pkt) {
+                        if (pkt[1] & 0x7F) == 0x44 && pkt[2] == 0x0A && pkt[3] < 10 && pkt[19] == F87Protocol.checksum20(pkt) {
                             parts[Int(pkt[3])] = pkt
                         }
                     }
@@ -776,7 +820,7 @@ final class HIDService: @unchecked Sendable {
                     CFRunLoopRunInMode(.defaultMode, 0.015, true)
                     while !collector.packets.isEmpty {
                         let pkt = collector.packets.removeFirst()
-                        if pkt[1] == 0x41 && pkt[2] == 36 && (pkt[4] >> 4) == layer && pkt[3] < 36 && pkt[19] == F87Protocol.checksum20(pkt) {
+                        if (pkt[1] & 0x7F) == 0x41 && pkt[2] == 36 && (pkt[4] >> 4) == layer && pkt[3] < 36 && pkt[19] == F87Protocol.checksum20(pkt) {
                             parts[Int(pkt[3])] = pkt
                         }
                     }
@@ -804,18 +848,18 @@ final class HIDService: @unchecked Sendable {
             var ackedCount = 0
             for frame in frames {
                 var echoed = false
-                for retry in 0..<2 {
-                    if retry > 0 { Thread.sleep(forTimeInterval: 0.015) }
+                for retry in 0..<3 {
+                    if retry > 0 { Thread.sleep(forTimeInterval: 0.020) }
                     let res = setOutputReport(dev, reportID: 0x13, bytes: frame)
                     guard res == kIOReturnSuccess else {
                         throw F87ProtocolError.transferFailed(String(format: "패킷 전송 실패 (0x%X)", res))
                     }
-                    let deadline = Date().addingTimeInterval(0.28)
+                    let deadline = Date().addingTimeInterval(0.35)
                     while Date() < deadline {
                         CFRunLoopRunInMode(.defaultMode, 0.010, true)
                         while !collector.packets.isEmpty {
                             let pkt = collector.packets.removeFirst()
-                            if pkt[1] == frame[1] && pkt[3] == frame[3] {
+                            if (pkt[1] & 0x7F) == (frame[1] & 0x7F) && pkt[3] == frame[3] {
                                 echoed = true
                                 break
                             }

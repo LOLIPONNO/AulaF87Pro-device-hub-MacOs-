@@ -249,6 +249,7 @@ final class AppViewModel: ObservableObject {
         perKeyColors = hidService.loadPerKeyCache()
         loadProfilesFromDisk()
         setupKeyMonitoring()
+        setupDeviceStateMonitoring()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         if !CommandLine.arguments.contains("--probe") {
             connectKeyboard()
@@ -385,6 +386,65 @@ final class AppViewModel: ObservableObject {
         if let led = Self.macKeyCodeToLed[keyCode] {
             activeKeyHits[led] = now.timeIntervalSinceReferenceDate
         }
+
+        // 키 입력 감지: 키보드가 절전 모드이거나 분리 상태였을 때 즉시 무중단 재연결
+        if !isConnected || connectionMode.contains("절전") {
+            autoReconnectSilently()
+        }
+    }
+
+    private var consecutivePollFailures: Int = 0
+    private var hotplugDebounceWorkItem: DispatchWorkItem?
+
+    private func setupDeviceStateMonitoring() {
+        hidService.onDeviceStateChange = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.handleHotplugEvent()
+            }
+        }
+    }
+
+    private func handleHotplugEvent() {
+        hotplugDebounceWorkItem?.cancel()
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, !self.isBusy else { return }
+            self.autoReconnectSilently()
+        }
+        hotplugDebounceWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+    }
+
+    func autoReconnectSilently() {
+        guard !isBusy else { return }
+        let service = hidService
+        hidQueue.async { [weak self] in
+            guard let self else { return }
+            if let snap = try? service.connectAndReadSnapshot() {
+                DispatchQueue.main.async {
+                    let changed = (self.connectionMode != snap.connectionMode) || !self.isConnected
+                    self.isConnected = true
+                    self.applySnapshotToUI(snap)
+                    self.statusTitle = "\(snap.modelName) 연결됨"
+                    self.statusDetail = nil
+                    self.consecutivePollFailures = 0
+                    self.checkAlDenteNotification()
+                    if changed {
+                        self.log("하드웨어 연결 변경 감지: \(snap.modelName) (\(snap.connectionMode))")
+                        self.showToast("연결 감지: \(snap.connectionMode)")
+                    }
+                }
+            } else if !service.isConnected {
+                DispatchQueue.main.async {
+                    if self.isConnected {
+                        self.isConnected = false
+                        self.statusTitle = "연결 대기 중"
+                        self.statusDetail = "키보드가 분리되었거나 절전 상태입니다"
+                        self.log("키보드 연결 해제됨 (신호 대기 중)")
+                    }
+                }
+            }
+        }
     }
 
     func setRefreshInterval(_ val: Double) {
@@ -453,7 +513,7 @@ final class AppViewModel: ObservableObject {
                 self.activeKeyHits = self.activeKeyHits.filter { refNow - $0.value < 1.5 }
 
                 let service = self.hidService
-                let shouldTryUpgrade = !self.isConnected || self.connectionMode.contains("Bluetooth")
+                let shouldTryUpgrade = !self.isConnected || self.connectionMode.contains("Bluetooth") || self.connectionMode.contains("절전")
                 self.isPollingHID = true
                 self.hidQueue.async { [weak self] in
                     defer {
@@ -470,6 +530,7 @@ final class AppViewModel: ObservableObject {
                                 self.applySnapshotToUI(snap)
                                 self.statusTitle = "\(snap.modelName) 연결됨"
                                 self.statusDetail = nil
+                                self.consecutivePollFailures = 0
                                 self.checkAlDenteNotification()
                                 if changedMode {
                                     self.log("자동 연결 감지: \(snap.modelName) (\(snap.connectionMode))")
@@ -479,7 +540,19 @@ final class AppViewModel: ObservableObject {
                         }
                     } else if let outcome = service.pollBatteryAndLatency() {
                         DispatchQueue.main.async {
+                            self?.consecutivePollFailures = 0
                             self?.recordLatencyMeasurements(samples: [outcome.latencyMs], bat: outcome.bat)
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            guard let self else { return }
+                            self.consecutivePollFailures += 1
+                            if self.consecutivePollFailures >= 4 && self.isConnected {
+                                if !self.connectionMode.contains("절전") {
+                                    self.statusTitle = "\(self.modelName) (절전 대기 중)"
+                                    self.statusDetail = "키를 누르면 즉시 깨어납니다"
+                                }
+                            }
                         }
                     }
                 }
