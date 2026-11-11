@@ -11,7 +11,8 @@ final class HIDPacketCollector {
         // Check spontaneous battery notification: 13 0A 01 00 04 05 <level> <state>
         if bytes[1] == 0x0A && bytes[2] == 0x01 && bytes[4] == 0x04 && bytes[5] == 0x05 {
             let level = Int(bytes[6])
-            let charging = bytes[7] == 0x10
+            let state = bytes[7]
+            let charging = (state != 0x00 && state != 0xFF)
             if (1...100).contains(level) {
                 latestSpontaneousBattery = BatteryStatus(percent: level, isCharging: charging, updatedAt: .now)
             }
@@ -153,11 +154,14 @@ final class HIDService: @unchecked Sendable {
                     cachedModelName = model
                     let cfg = try readWiredConfig(dev)
                     saveGoodConfigBackup(cfg)
+                    let pct = cachedBattery?.percent ?? 100
+                    let wiredBattery = BatteryStatus(percent: pct, isCharging: true, updatedAt: .now)
+                    cachedBattery = wiredBattery
                     return F87Protocol.parseSnapshot(
                         rawConfig: cfg,
                         connectionMode: "USB 유선 모드 (258A:010C)",
                         modelName: model,
-                        battery: cachedBattery
+                        battery: wiredBattery
                     )
                 } else if pid == F87Protocol.wirelessPID {
                     guard up == 0xFF02 || maxOut >= 20 else { continue }
@@ -225,6 +229,10 @@ final class HIDService: @unchecked Sendable {
         return try connectAndReadSnapshot()
     }
 
+    func updateCachedBattery(_ newBat: BatteryStatus) {
+        cachedBattery = newBat
+    }
+
     func pollBattery() -> BatteryStatus? {
         pollBatteryAndLatency()?.bat ?? cachedBattery
     }
@@ -236,7 +244,10 @@ final class HIDService: @unchecked Sendable {
             return measureWirelessPingAndBattery(dev)
         case .wiredUSB(let dev):
             let rtt = measureWiredPing(dev)
-            return (cachedBattery, rtt)
+            let pct = cachedBattery?.percent ?? 100
+            let bat = BatteryStatus(percent: pct, isCharging: true, updatedAt: .now)
+            cachedBattery = bat
+            return (bat, rtt)
         case .bluetoothLE(let dev):
             let rtt = measureBluetoothPing(dev)
             return (cachedBattery, rtt)
@@ -648,9 +659,18 @@ final class HIDService: @unchecked Sendable {
                         let t1 = CACurrentMediaTime()
                         let rtt = max(0.8, (t1 - t0) * 1000.0)
                         lastMeasuredRttMs = rtt
-                        let level = Int(pkt[5])
-                        let state = pkt[6]
-                        let charging = (state == 0x10)
+                        var level = Int(pkt[5])
+                        var state = pkt[6]
+                        if !(1...100).contains(level) && (1...100).contains(Int(pkt[4])) {
+                            level = Int(pkt[4])
+                            state = pkt[5]
+                        } else if !(1...100).contains(level) && (1...100).contains(Int(pkt[6])) {
+                            level = Int(pkt[6])
+                            state = pkt[7]
+                        }
+                        let charging = (state != 0x00 && state != 0xFF) ||
+                                       (pkt[6] != 0x00 && pkt[6] != 0xFF && pkt[6] != UInt8(level)) ||
+                                       (pkt[7] != 0x00 && pkt[7] != 0xFF)
                         if (1...100).contains(level) {
                             cachedBattery = BatteryStatus(percent: level, isCharging: charging, updatedAt: .now)
                         }

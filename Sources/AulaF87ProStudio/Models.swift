@@ -576,6 +576,26 @@ struct BatteryStatus: Equatable, Sendable {
     let percent: Int // 1..100
     let isCharging: Bool
     let updatedAt: Date
+
+    func withCharging(_ charging: Bool) -> BatteryStatus {
+        BatteryStatus(percent: percent, isCharging: charging, updatedAt: .now)
+    }
+}
+
+enum ChargingOverrideMode: String, CaseIterable, Identifiable, Sendable {
+    case auto = "자동 감지 (하드웨어/USB)"
+    case forceCharging = "충전 중 ⚡ (케이블 연결됨)"
+    case forceDischarging = "미충전 (무선 배터리 방전)"
+
+    var id: String { rawValue }
+
+    var shortLabel: String {
+        switch self {
+        case .auto: return "자동 감지"
+        case .forceCharging: return "충전 중 ⚡"
+        case .forceDischarging: return "미충전"
+        }
+    }
 }
 
 struct PowerTelemetry: Sendable {
@@ -607,10 +627,20 @@ struct PowerTelemetry: Sendable {
         lightBarMode: Int,
         isWiredUSB: Bool,
         isActivelyTyping: Bool = false,
-        typingSpeedCPM: Int = 0
+        typingSpeedCPM: Int = 0,
+        chargingMode: ChargingOverrideMode = .auto
     ) -> PowerTelemetry {
-        let pct = battery?.percent ?? 36
-        let charging = battery?.isCharging ?? false
+        let pct = battery?.percent ?? 49
+        let hardwareCharging = (battery?.isCharging ?? false) || isWiredUSB
+        let charging: Bool
+        switch chargingMode {
+        case .auto:
+            charging = hardwareCharging
+        case .forceCharging:
+            charging = true
+        case .forceDischarging:
+            charging = false
+        }
         let capacity = 4000 // AULA F87 Pro V1 4000mAh Li-ion battery
 
         let v: Double = charging

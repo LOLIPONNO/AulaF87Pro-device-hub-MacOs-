@@ -157,15 +157,14 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
 
-                if let bat = vm.battery {
-                    HStack(spacing: 6) {
-                        Image(systemName: batterySymbol(for: bat))
-                            .foregroundStyle(batteryColor(for: bat))
-                        Text(bat.isCharging ? "충전 중 (\(bat.percent)%)" : "배터리 잔량: \(bat.percent)%")
-                            .font(.caption.bold())
-                    }
-                    .padding(.top, 2)
+                let bat = vm.effectiveBattery
+                HStack(spacing: 6) {
+                    Image(systemName: batterySymbol(for: bat))
+                        .foregroundStyle(batteryColor(for: bat))
+                    Text(bat.isCharging ? "충전 중 ⚡ (\(bat.percent)%)" : "배터리 잔량: \(bat.percent)%")
+                        .font(.caption.bold())
                 }
+                .padding(.top, 2)
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 12)
@@ -196,22 +195,21 @@ struct ContentView: View {
                 }
             }
 
-            if let bat = vm.battery {
-                Divider().frame(height: 22)
-                HStack(spacing: 6) {
-                    Image(systemName: batterySymbol(for: bat))
-                        .font(.system(size: 14))
-                        .foregroundStyle(batteryColor(for: bat))
-                    Text("\(bat.percent)%")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                    Text(bat.isCharging ? "충전 중" : "무선 사용 중")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(Color.primary.opacity(0.06)))
+            let bat = vm.effectiveBattery
+            Divider().frame(height: 22)
+            HStack(spacing: 6) {
+                Image(systemName: batterySymbol(for: bat))
+                    .font(.system(size: 14))
+                    .foregroundStyle(batteryColor(for: bat))
+                Text("\(bat.percent)%")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                Text(bat.isCharging ? "충전 중 ⚡" : "무선 사용 중")
+                    .font(.caption2)
+                    .foregroundStyle(bat.isCharging ? Color.green : Color.secondary)
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.primary.opacity(0.06)))
 
             if let lat = vm.latencyStats {
                 Divider().frame(height: 22)
@@ -1203,13 +1201,13 @@ struct ContentView: View {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Label("배터리 잔량", systemImage: batterySymbol(for: vm.battery ?? BatteryStatus(percent: tel.percent, isCharging: tel.isCharging, updatedAt: .now)))
+                            Label("배터리 잔량", systemImage: batterySymbol(for: vm.effectiveBattery))
                                 .font(.subheadline.bold())
-                                .foregroundStyle(batteryColor(for: vm.battery ?? BatteryStatus(percent: tel.percent, isCharging: tel.isCharging, updatedAt: .now)))
+                                .foregroundStyle(batteryColor(for: vm.effectiveBattery))
                             Spacer()
                             Text("\(tel.percent)%")
                                 .font(.system(size: 26, weight: .bold, design: .rounded))
-                                .foregroundStyle(batteryColor(for: vm.battery ?? BatteryStatus(percent: tel.percent, isCharging: tel.isCharging, updatedAt: .now)))
+                                .foregroundStyle(batteryColor(for: vm.effectiveBattery))
                         }
 
                         // Progress Gauge Bar with AlDente Limit Line
@@ -1282,7 +1280,8 @@ struct ContentView: View {
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
                             } else {
-                                Text("2.4GHz 무선 배터리 방전 구동 중")
+                                let modeDesc = vm.connectionMode.contains("USB") ? "USB 유선 연결" : (vm.connectionMode.contains("Bluetooth") ? "Bluetooth 무선 배터리 구동" : "2.4GHz 무선 배터리 구동")
+                                Text("\(modeDesc) 중 (케이블 미감지)")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                             }
@@ -1290,10 +1289,52 @@ struct ContentView: View {
                         }
 
                         HStack {
-                            Text(tel.isCharging ? "시간당 약 +17% 충전 속도" : "충전 케이블 연결 시 자동 충전")
+                            Text(tel.isCharging ? "시간당 약 +17% 고속 충전 중 (완충 시 보호)" : "외부 충전기 연결 시 아래 버튼으로 전환")
                                 .font(.caption2)
                                 .foregroundStyle(tel.isCharging ? .green : .secondary)
                             Spacer()
+                        }
+
+                        Divider().padding(.vertical, 2)
+
+                        HStack(spacing: 8) {
+                            Button {
+                                vm.toggleChargingOverride()
+                            } label: {
+                                Label(
+                                    tel.isCharging ? "미충전(무선 구동)으로 전환" : "충전 케이블 연결됨으로 지정 (충전 중 ⚡)",
+                                    systemImage: tel.isCharging ? "battery.75percent" : "bolt.fill"
+                                )
+                                .font(.caption2.bold())
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(tel.isCharging ? .secondary : .green)
+                            .controlSize(.small)
+
+                            Spacer()
+
+                            Menu {
+                                ForEach(ChargingOverrideMode.allCases) { mode in
+                                    Button {
+                                        vm.setChargingMode(mode)
+                                    } label: {
+                                        if vm.chargingOverrideMode == mode {
+                                            Label(mode.rawValue, systemImage: "checkmark")
+                                        } else {
+                                            Text(mode.rawValue)
+                                        }
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Text("감지: \(vm.chargingOverrideMode.shortLabel)")
+                                        .font(.caption2)
+                                    Image(systemName: "chevron.up.chevron.down")
+                                        .font(.system(size: 9))
+                                }
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
                         }
                     }
                     .padding(8)
