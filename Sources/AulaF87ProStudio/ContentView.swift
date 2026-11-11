@@ -1337,7 +1337,17 @@ struct ContentView: View {
                         }
 
                         HStack {
-                            Text(tel.isReactiveMode && !tel.isActivelyTyping ? "총 소모 전류: \(Int(tel.totalDischargeCurrentMa)) mA (LED 암전)" : "총 소모 전류: 약 \(Int(tel.totalDischargeCurrentMa)) mA")
+                            let currentDesc: String = {
+                                if tel.isReactiveMode && !tel.isActivelyTyping {
+                                    if tel.sideLedsCurrentMa > 0 {
+                                        return "총 소모 전류: \(Int(tel.totalDischargeCurrentMa)) mA (메인키 0mA 암전 · 측면/바 \(Int(tel.sideLedsCurrentMa))mA)"
+                                    } else {
+                                        return "총 소모 전류: \(Int(tel.totalDischargeCurrentMa)) mA (전체 조명 소등 0mA)"
+                                    }
+                                }
+                                return "총 소모 전류: 약 \(Int(tel.totalDischargeCurrentMa)) mA"
+                            }()
+                            Text(currentDesc)
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -1348,7 +1358,13 @@ struct ContentView: View {
 
                         HStack {
                             let levelText: String = {
-                                if tel.isReactiveMode && !tel.isActivelyTyping { return "반응형 타건 키 입력 대기 (초절전)" }
+                                if tel.isReactiveMode && !tel.isActivelyTyping {
+                                    if tel.sideLedsCurrentMa > 0 {
+                                        return "반응형 타건 대기 (메인 0mA 암전 · 측면 조명 가동)"
+                                    } else {
+                                        return "초절전 최저 대기 수준 (18 mA)"
+                                    }
+                                }
                                 if tel.totalDischargeCurrentMa < 50 { return "초절전 수준 (매우 낮음)" }
                                 if tel.totalDischargeCurrentMa < 140 { return "보통 절전 수준" }
                                 if tel.totalDischargeCurrentMa < 230 { return "표준 게이밍 수준" }
@@ -1438,7 +1454,7 @@ struct ContentView: View {
                                     .background(Capsule().fill(Color.secondary.opacity(0.12)))
                                 }
                             }
-                            Text("반응형 타건은 평상시 모든 백라이트 LED가 소등(0 mA)되어 전력을 소모하지 않으며, 키를 누르는 순간에만 해당 키가 일시 점등됩니다. 상시 점등(295 mA) 대비 최대 95% 전력을 아껴 배터리를 훨씬 오래 사용할 수 있습니다.")
+                            Text("반응형 타건은 키를 누르지 않을 때 87키 메인 스위치 백라이트가 0 mA로 완전 소등됩니다. 현재 소모되는 전력은 양측면 RGB 스트립 & 라이트바(\(Int(tel.sideLedsCurrentMa)) mA)와 2.4GHz 무선 MCU(18 mA)의 기저 전력(\(Int(tel.totalDischargeCurrentMa)) mA)입니다. 측면 조명까지 소등하면 최저 18 mA(약 73 mW)로 배터리를 220시간 이상 극대화할 수 있습니다.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
