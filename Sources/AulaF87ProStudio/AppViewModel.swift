@@ -90,6 +90,27 @@ final class AppViewModel: ObservableObject {
     @Published var profiles: [StoredProfile] = []
     @Published var toastMessage: String?
     @Published var logs: [String] = []
+    @Published var lastTelemetryUpdate: Date = .now
+
+    // Keystroke & Reactive Typing Tracking
+    @Published var isTypingNow: Bool = false
+    @Published var typingSpeedCPM: Int = 0
+    @Published var activeKeyHits: [Int: Double] = [:] // LED index -> hit time in seconds
+    @Published var lastKeystrokeAt: Date?
+    private var keystrokeTimestamps: [Date] = []
+    private var localKeyMonitor: Any?
+    private var globalKeyMonitor: Any?
+
+    private static let macKeyCodeToLed: [UInt16: Int] = [
+        53: 0, 122: 12, 120: 18, 99: 24, 118: 30, 96: 36, 97: 42, 98: 48, 100: 54, 101: 60, 109: 66, 103: 72, 111: 78,
+        50: 1, 18: 7, 19: 13, 20: 19, 21: 25, 23: 31, 22: 37, 26: 43, 28: 49, 25: 55, 29: 61, 27: 67, 24: 73, 51: 79,
+        48: 2, 12: 8, 13: 14, 14: 20, 15: 26, 17: 32, 16: 38, 32: 44, 34: 50, 31: 56, 35: 62, 33: 68, 30: 74, 42: 80,
+        57: 3, 0: 9, 1: 15, 2: 21, 3: 27, 5: 33, 4: 39, 38: 45, 40: 51, 37: 57, 41: 63, 39: 69, 36: 75,
+        56: 4, 6: 10, 7: 16, 8: 22, 9: 28, 11: 34, 45: 40, 46: 46, 43: 52, 47: 58, 44: 64, 60: 70,
+        59: 5, 55: 11, 58: 17, 49: 35, 61: 53, 62: 83,
+        123: 89, 125: 95, 124: 101, 126: 94,
+        114: 85, 115: 91, 116: 97, 117: 86, 119: 92, 121: 98
+    ]
 
     private var undoStack: [[Int: RGBColor]] = []
     private var redoStack: [[Int: RGBColor]] = []
@@ -98,6 +119,7 @@ final class AppViewModel: ObservableObject {
     private let musicVisualizer = MusicVisualizer()
     private var audioStreamFrameInFlight = false
     private var batteryTimer: Timer?
+    private var isPollingHID = false
 
     private let profilesURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -109,6 +131,7 @@ final class AppViewModel: ObservableObject {
     init() {
         perKeyColors = hidService.loadPerKeyCache()
         loadProfilesFromDisk()
+        setupKeyMonitoring()
         if !CommandLine.arguments.contains("--probe") {
             connectKeyboard()
             startBatteryPolling()
@@ -127,7 +150,9 @@ final class AppViewModel: ObservableObject {
             activePerKeyCount: perKeyColors.count,
             sideLightMode: sideLightMode,
             lightBarMode: lightBarMode,
-            isWiredUSB: connectionMode.contains("USB")
+            isWiredUSB: connectionMode.contains("USB"),
+            isActivelyTyping: isTypingNow,
+            typingSpeedCPM: typingSpeedCPM
         )
     }
 
@@ -212,16 +237,69 @@ final class AppViewModel: ObservableObject {
         }
     }
 
+    deinit {
+        batteryTimer?.invalidate()
+        if let m = localKeyMonitor { NSEvent.removeMonitor(m) }
+        if let m = globalKeyMonitor { NSEvent.removeMonitor(m) }
+    }
+
+    private func setupKeyMonitoring() {
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            self?.registerKeystroke(keyCode: event.keyCode)
+            return event
+        }
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            DispatchQueue.main.async {
+                self?.registerKeystroke(keyCode: event.keyCode)
+            }
+        }
+    }
+
+    func registerKeystroke(keyCode: UInt16) {
+        let now = Date()
+        let led = Self.macKeyCodeToLed[keyCode] ?? 35
+        keystrokeTimestamps.append(now)
+        let cutoff = now.addingTimeInterval(-5.0)
+        keystrokeTimestamps.removeAll { $0 < cutoff }
+        lastKeystrokeAt = now
+        isTypingNow = true
+        typingSpeedCPM = keystrokeTimestamps.count * 12
+        activeKeyHits[led] = now.timeIntervalSinceReferenceDate
+    }
+
     private func startBatteryPolling() {
-        batteryTimer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+        batteryTimer?.invalidate()
+        batteryTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                guard let self, !self.isBusy, !self.isMusicSyncActive else { return }
+                guard let self, !self.isBusy, !self.isMusicSyncActive, !self.isPollingHID else { return }
+                self.lastTelemetryUpdate = .now
+
+                // Real-time typing activity check
+                let now = Date()
+                let cutoff = now.addingTimeInterval(-5.0)
+                self.keystrokeTimestamps.removeAll { $0 < cutoff }
+                self.typingSpeedCPM = self.keystrokeTimestamps.count * 12
+                if let last = self.lastKeystrokeAt, now.timeIntervalSince(last) > 1.8 {
+                    self.isTypingNow = false
+                } else if self.lastKeystrokeAt == nil {
+                    self.isTypingNow = false
+                }
+                let refNow = now.timeIntervalSinceReferenceDate
+                self.activeKeyHits = self.activeKeyHits.filter { refNow - $0.value < 1.5 }
+
                 let service = self.hidService
                 let shouldTryUpgrade = !self.isConnected || self.connectionMode.contains("Bluetooth")
-                self.hidQueue.async {
+                self.isPollingHID = true
+                self.hidQueue.async { [weak self] in
+                    defer {
+                        Task { @MainActor [weak self] in
+                            self?.isPollingHID = false
+                        }
+                    }
                     if shouldTryUpgrade {
                         if let snap = try? service.connectAndReadSnapshot() {
                             DispatchQueue.main.async {
+                                guard let self else { return }
                                 let changedMode = (self.connectionMode != snap.connectionMode) || !self.isConnected
                                 self.isConnected = true
                                 self.applySnapshotToUI(snap)
@@ -235,9 +313,29 @@ final class AppViewModel: ObservableObject {
                         }
                     } else if let bat = service.pollBattery() {
                         DispatchQueue.main.async {
-                            self.battery = bat
+                            self?.battery = bat
                         }
                     }
+                }
+            }
+        }
+    }
+
+    func forcePollBatteryNow() {
+        guard !isBusy, !isPollingHID else { return }
+        isPollingHID = true
+        hidQueue.async { [weak self] in
+            guard let self else { return }
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.isPollingHID = false
+                }
+            }
+            if let bat = self.hidService.pollBattery() {
+                DispatchQueue.main.async {
+                    self.battery = bat
+                    self.lastTelemetryUpdate = .now
+                    self.showToast("실시간 배터리 및 전력 정보 갱신 완료 (\(bat.percent)%)")
                 }
             }
         }

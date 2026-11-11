@@ -53,6 +53,25 @@ struct LightingEffect: Identifiable, Hashable, Sendable {
     let icon: String
     let supportsSpeed: Bool
     let supportsColor: Bool
+    let isReactive: Bool
+
+    init(
+        id: Int,
+        titleKo: String,
+        titleEn: String,
+        icon: String,
+        supportsSpeed: Bool,
+        supportsColor: Bool,
+        isReactive: Bool = false
+    ) {
+        self.id = id
+        self.titleKo = titleKo
+        self.titleEn = titleEn
+        self.icon = icon
+        self.supportsSpeed = supportsSpeed
+        self.supportsColor = supportsColor
+        self.isReactive = isReactive
+    }
 
     static let customPerKeyID = 18
 
@@ -61,13 +80,13 @@ struct LightingEffect: Identifiable, Hashable, Sendable {
         .init(id: 1, titleKo: "상시 점등", titleEn: "Static", icon: "sun.max.fill", supportsSpeed: false, supportsColor: true),
         .init(id: 2, titleKo: "숨쉬기", titleEn: "Breathing", icon: "wind", supportsSpeed: true, supportsColor: true),
         .init(id: 3, titleKo: "레인보우 웨이브", titleEn: "Rainbow Wave", icon: "rainbow", supportsSpeed: true, supportsColor: false),
-        .init(id: 4, titleKo: "일촉즉발", titleEn: "Flash Away", icon: "bolt.fill", supportsSpeed: true, supportsColor: true),
+        .init(id: 4, titleKo: "일촉즉발", titleEn: "Flash Away", icon: "bolt.fill", supportsSpeed: true, supportsColor: true, isReactive: true),
         .init(id: 5, titleKo: "빗방울", titleEn: "Raindrops", icon: "cloud.rain.fill", supportsSpeed: true, supportsColor: true),
-        .init(id: 7, titleKo: "물결 확산", titleEn: "Ripples", icon: "dot.radiowaves.left.and.right", supportsSpeed: true, supportsColor: true),
+        .init(id: 7, titleKo: "물결 확산", titleEn: "Ripples", icon: "dot.radiowaves.left.and.right", supportsSpeed: true, supportsColor: true, isReactive: true),
         .init(id: 8, titleKo: "별빛 반짝임", titleEn: "Twinkling Stars", icon: "sparkles", supportsSpeed: true, supportsColor: true),
         .init(id: 10, titleKo: "레트로 스네이크", titleEn: "Retro Snake", icon: "scribble.variable", supportsSpeed: true, supportsColor: true),
         .init(id: 11, titleKo: "네온 스트림", titleEn: "Neon Stream", icon: "water.waves", supportsSpeed: true, supportsColor: true),
-        .init(id: 12, titleKo: "반응형 타건", titleEn: "Reactive", icon: "hand.tap.fill", supportsSpeed: true, supportsColor: true),
+        .init(id: 12, titleKo: "반응형 타건", titleEn: "Reactive", icon: "hand.tap.fill", supportsSpeed: true, supportsColor: true, isReactive: true),
         .init(id: 13, titleKo: "사인파 웨이브", titleEn: "Sine Wave", icon: "waveform.path.ecg", supportsSpeed: true, supportsColor: true),
         .init(id: 15, titleKo: "회전 풍차", titleEn: "Rotating Windmill", icon: "hurricane", supportsSpeed: true, supportsColor: false),
         .init(id: 16, titleKo: "컬러 폭포", titleEn: "Colorful Waterfall", icon: "arrow.down.to.line.compact", supportsSpeed: true, supportsColor: false),
@@ -560,6 +579,10 @@ struct PowerTelemetry: Sendable {
     let chargingPowerW: Double    // ~3.25 W
     let remainingUsageHours: Double
     let timeToFullChargeHours: Double
+    let isReactiveMode: Bool
+    let isActivelyTyping: Bool
+    let typingSpeedCPM: Int
+    let reactiveDutyPercent: Double // 0% ~ 100%
 
     static func calculate(
         battery: BatteryStatus?,
@@ -568,7 +591,9 @@ struct PowerTelemetry: Sendable {
         activePerKeyCount: Int,
         sideLightMode: Int,
         lightBarMode: Int,
-        isWiredUSB: Bool
+        isWiredUSB: Bool,
+        isActivelyTyping: Bool = false,
+        typingSpeedCPM: Int = 0
     ) -> PowerTelemetry {
         let pct = battery?.percent ?? 36
         let charging = battery?.isCharging ?? false
@@ -580,12 +605,31 @@ struct PowerTelemetry: Sendable {
 
         let mcu: Double = isWiredUSB ? 24.0 : 18.0
 
+        let isReactive = (effect == 12 || effect == 7 || effect == 4)
         let mainLeds: Double
+        let dutyPercent: Double
+
         if effect == 0 || brightness == 0 {
             mainLeds = 0.0
+            dutyPercent = 0.0
+        } else if isReactive {
+            let maxBrightnessScale = Double(max(1, brightness)) / 4.0
+            if isActivelyTyping {
+                // 실시간 타건 감지 중: 키 입력 빈도(CPM) 및 효과 확산 범위에 비례하여 동적 소비 전류 계산
+                let spreadMultiplier: Double = (effect == 7 ? 2.2 : (effect == 4 ? 2.6 : 1.0))
+                let kps = max(1.5, Double(typingSpeedCPM) / 60.0)
+                let activeKeyEquivalent = min(14.0, kps * 0.38 * spreadMultiplier)
+                mainLeds = max(4.0, (activeKeyEquivalent * 3.39 * maxBrightnessScale).rounded())
+                dutyPercent = min(100.0, (mainLeds / max(1.0, 295.0 * maxBrightnessScale)) * 100.0)
+            } else {
+                // 키를 누르지 않고 대기 중인 상태: 모든 백라이트 LED 완전 소등 (0 mA)
+                mainLeds = 0.0
+                dutyPercent = 0.0
+            }
         } else if effect == LightingEffect.customPerKeyID {
             let scale = Double(max(1, brightness)) / 4.0
             mainLeds = Double(activePerKeyCount) * 2.8 * scale
+            dutyPercent = (Double(activePerKeyCount) / 87.0) * 100.0
         } else {
             switch brightness {
             case 1: mainLeds = 48.0
@@ -594,6 +638,7 @@ struct PowerTelemetry: Sendable {
             case 4: mainLeds = 295.0
             default: mainLeds = 0.0
             }
+            dutyPercent = 100.0
         }
 
         let sideLeds: Double = (sideLightMode == 0 ? 0.0 : (sideLightMode == 3 ? 36.0 : 52.0))
@@ -617,7 +662,19 @@ struct PowerTelemetry: Sendable {
         let chgPowerW = charging ? (chgCurrent * 5.0 / 1000.0) : 0.0
 
         let remainingMah = Double(capacity) * (Double(pct) / 100.0)
-        let usageHours = max(0.5, remainingMah / max(12.0, totalDischarge))
+
+        // Estimated continuous battery life:
+        // In reactive mode, typical typing sessions consist of intermittent typing + pauses.
+        // Effective average current for battery life estimate is ~8mA LED + MCU + side.
+        let effectiveDischargeForEstimate: Double
+        if isReactive {
+            let avgReactiveLed = 8.0 * (Double(max(1, brightness)) / 4.0)
+            effectiveDischargeForEstimate = mcu + avgReactiveLed + sideLeds
+        } else {
+            effectiveDischargeForEstimate = totalDischarge
+        }
+
+        let usageHours = max(0.5, remainingMah / max(12.0, effectiveDischargeForEstimate))
 
         let neededMah = Double(capacity) * (Double(100 - pct) / 100.0)
         let netChargeCurrent = max(120.0, chgCurrent - (isWiredUSB ? 0 : totalDischarge))
@@ -637,7 +694,11 @@ struct PowerTelemetry: Sendable {
             chargingCurrentMa: chgCurrent,
             chargingPowerW: chgPowerW,
             remainingUsageHours: usageHours,
-            timeToFullChargeHours: chargeHours
+            timeToFullChargeHours: chargeHours,
+            isReactiveMode: isReactive,
+            isActivelyTyping: isActivelyTyping,
+            typingSpeedCPM: typingSpeedCPM,
+            reactiveDutyPercent: dutyPercent
         )
     }
 }

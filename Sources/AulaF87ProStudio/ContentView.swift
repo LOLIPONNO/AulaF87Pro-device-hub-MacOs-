@@ -84,7 +84,10 @@ struct ContentView: View {
 
     private var canvasHeaderTitle: String {
         switch vm.currentTab {
-        case .batteryMonitor: return "AULA F87 Pro V1 실시간 하드웨어 전력 & 조명 연동 상태"
+        case .batteryMonitor:
+            return vm.powerTelemetry.isReactiveMode
+                ? "AULA F87 Pro V1 실시간 전력 모니터 (반응형 타건 모드 · 키 미입력 시 암전)"
+                : "AULA F87 Pro V1 실시간 하드웨어 전력 & 조명 연동 상태"
         case .perKey: return "87키 TKL 개별 키 RGB 캔버스 (클릭하여 키 색상 지정)"
         case .keymap: return "87키 TKL 키 매핑 인스펙터 (변경할 키를 클릭하세요)"
         case .music: return "87키 TKL 11밴드 오디오 스펙트럼 실시간 프리뷰"
@@ -96,6 +99,11 @@ struct ContentView: View {
         switch vm.currentTab {
         case .batteryMonitor:
             let tel = vm.powerTelemetry
+            if tel.isReactiveMode {
+                return tel.isActivelyTyping
+                    ? "반응형 실시간 타건 중 (\(tel.typingSpeedCPM)타/분): 소비 전력 약 \(Int(tel.totalPowerMw))mW (\(Int(tel.totalDischargeCurrentMa))mA) · 잔여 약 \(formatHours(tel.remainingUsageHours))"
+                    : "반응형 타건 대기: 키 미입력으로 백라이트 완전 소등 (0mA) · 초절전 상태 · 잔여 약 \(formatHours(tel.remainingUsageHours))"
+            }
             return tel.isCharging
                 ? "충전 중: 약 \(String(format: "%.2f", tel.chargingPowerW))W (+약 \(Int(tel.chargingCurrentMa))mA) · 완충까지 약 \(formatHours(tel.timeToFullChargeHours))"
                 : "배터리 잔량 \(tel.percent)% · 소비 전력 약 \(String(format: "%.2f", tel.totalPowerW))W (\(Int(tel.totalDischargeCurrentMa))mA) · 약 \(formatHours(tel.remainingUsageHours)) 사용 가능"
@@ -1111,6 +1119,47 @@ struct ContentView: View {
     private var batteryMonitorTabView: some View {
         let tel = vm.powerTelemetry
         return VStack(alignment: .leading, spacing: 18) {
+            // Real-time 1-Second Auto Refresh Status Banner
+            HStack(spacing: 12) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(vm.isConnected ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                    Text("1초 실시간 모니터링 활성화")
+                        .font(.caption.bold())
+                        .foregroundStyle(vm.isConnected ? Color.green : Color.orange)
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 4)
+                .background(Capsule().fill((vm.isConnected ? Color.green : Color.orange).opacity(0.12)))
+
+                Text("하드웨어 패킷 1,000ms 주기 갱신 · 소비 전력 및 잔여 시간 실시간 계산")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                HStack(spacing: 6) {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("갱신 시각: \(vm.lastTelemetryUpdate, format: .dateTime.hour().minute().second())")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+
+                Button {
+                    vm.forcePollBatteryNow()
+                } label: {
+                    Label("지금 즉시 갱신", systemImage: "arrow.clockwise")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(vm.isBusy)
+            }
+            .padding(.bottom, -4)
+
             // 1. Top 4 KPI Metric Cards
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 14)], spacing: 14) {
                 // Card 1: Battery Level & Cell Voltage
@@ -1207,13 +1256,13 @@ struct ContentView: View {
                                 .font(.subheadline.bold())
                                 .foregroundStyle(.orange)
                             Spacer()
-                            Text("\(Int(tel.totalPowerMw)) mW")
-                                .font(.system(size: 26, weight: .bold, design: .rounded))
+                            Text(tel.isReactiveMode && !tel.isActivelyTyping ? "\(Int(tel.totalPowerMw)) mW (대기)" : "\(Int(tel.totalPowerMw)) mW")
+                                .font(.system(size: 24, weight: .bold, design: .rounded))
                                 .foregroundStyle(.orange)
                         }
 
                         HStack {
-                            Text("총 소모 전류: 약 \(Int(tel.totalDischargeCurrentMa)) mA")
+                            Text(tel.isReactiveMode && !tel.isActivelyTyping ? "총 소모 전류: \(Int(tel.totalDischargeCurrentMa)) mA (LED 암전)" : "총 소모 전류: 약 \(Int(tel.totalDischargeCurrentMa)) mA")
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -1224,6 +1273,7 @@ struct ContentView: View {
 
                         HStack {
                             let levelText: String = {
+                                if tel.isReactiveMode && !tel.isActivelyTyping { return "반응형 타건 키 입력 대기 (초절전)" }
                                 if tel.totalDischargeCurrentMa < 50 { return "초절전 수준 (매우 낮음)" }
                                 if tel.totalDischargeCurrentMa < 140 { return "보통 절전 수준" }
                                 if tel.totalDischargeCurrentMa < 230 { return "표준 게이밍 수준" }
@@ -1252,7 +1302,7 @@ struct ContentView: View {
                         }
 
                         HStack {
-                            Text(tel.isCharging ? "현재 배터리 잔량 \(tel.percent)% 기준" : "현재 조명(밝기 \(vm.brightness)단계) 유지 시")
+                            Text(tel.isCharging ? "현재 배터리 잔량 \(tel.percent)% 기준" : (tel.isReactiveMode ? "반응형 타건 모드 (상시 대비 5~8배 연장)" : "현재 조명(밝기 \(vm.brightness)단계) 유지 시"))
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                             Spacer()
@@ -1263,6 +1313,10 @@ struct ContentView: View {
                                 Text("완충 시 자동 과충전 방지 모드 작동")
                                     .font(.caption2)
                                     .foregroundStyle(.green)
+                            } else if tel.isReactiveMode {
+                                Text("키를 누를 때만 점등되어 배터리 극대화")
+                                    .font(.caption2)
+                                    .foregroundStyle(.cyan)
                             } else {
                                 Text("백라이트 끄면 최대 180시간까지 연장")
                                     .font(.caption2)
@@ -1272,6 +1326,50 @@ struct ContentView: View {
                         }
                     }
                     .padding(8)
+                }
+            }
+
+            // Dedicated Reactive Typing Mode Notice & Live Status
+            if tel.isReactiveMode {
+                GroupBox {
+                    HStack(spacing: 14) {
+                        Image(systemName: "hand.tap.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(.cyan)
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 8) {
+                                Text("반응형 타건 모드 (키 입력 감응형) 작동 중")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(.cyan)
+                                if tel.isActivelyTyping {
+                                    HStack(spacing: 4) {
+                                        Circle().fill(.green).frame(width: 7, height: 7)
+                                        Text("실시간 타건 감지됨 (\(tel.typingSpeedCPM) 타/분) · 동적 전류 약 \(Int(tel.mainLedsCurrentMa)) mA")
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(.green)
+                                    }
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.green.opacity(0.12)))
+                                } else {
+                                    HStack(spacing: 4) {
+                                        Circle().fill(.secondary).frame(width: 7, height: 7)
+                                        Text("키 미입력 대기 상태 (메인 LED 0 mA 소등)")
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+                                }
+                            }
+                            Text("반응형 타건은 평상시 모든 백라이트 LED가 소등(0 mA)되어 전력을 소모하지 않으며, 키를 누르는 순간에만 해당 키가 일시 점등됩니다. 상시 점등(295 mA) 대비 최대 95% 전력을 아껴 배터리를 훨씬 오래 사용할 수 있습니다.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(6)
                 }
             }
 
@@ -1293,8 +1391,17 @@ struct ContentView: View {
                         let sideRatio = tel.totalDischargeCurrentMa > 0 ? (tel.sideLedsCurrentMa / tel.totalDischargeCurrentMa) : 0
                         let mcuRatio = tel.totalDischargeCurrentMa > 0 ? (tel.mcuCurrentMa / tel.totalDischargeCurrentMa) : 0
 
+                        let mainTitle: String = {
+                            if tel.isReactiveMode {
+                                return tel.isActivelyTyping
+                                    ? "87키 메인 백라이트 (반응형 타건 중 · \(tel.typingSpeedCPM)타/분)"
+                                    : "87키 메인 백라이트 (반응형 대기 중 · 키 미입력 암전 0 mA)"
+                            }
+                            return "87키 메인 백라이트 LED (현재 밝기 \(vm.brightness)단계)"
+                        }()
+
                         powerBarRow(
-                            title: "87키 메인 백라이트 LED (현재 밝기 \(vm.brightness)단계)",
+                            title: mainTitle,
                             ma: Int(tel.mainLedsCurrentMa),
                             ratio: mainRatio,
                             color: .pink
@@ -1319,7 +1426,9 @@ struct ContentView: View {
                         HStack(spacing: 12) {
                             Image(systemName: "info.circle.fill")
                                 .foregroundStyle(.secondary)
-                            Text("AULA F87 Pro는 87개의 독립 RGB LED가 전체 전력의 70% 이상을 차지합니다. 배터리를 오래 쓰려면 밝기를 1~2단계로 낮추는 것이 가장 효과적입니다.")
+                            Text(tel.isReactiveMode
+                                ? "현재 반응형 타건 모드입니다. 키를 누르지 않을 때는 메인 백라이트가 0 mA로 꺼져 배터리가 초장시간 보존됩니다."
+                                : "AULA F87 Pro는 87개의 독립 RGB LED가 전체 전력의 70% 이상을 차지합니다. 배터리를 오래 쓰려면 밝기를 1~2단계로 낮추는 것이 가장 효과적입니다.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1331,15 +1440,23 @@ struct ContentView: View {
                 // Right: Battery Life Simulation & One-Click Eco Optimizer
                 GroupBox {
                     VStack(alignment: .leading, spacing: 14) {
-                        Label("밝기 단계별 예상 배터리 지속 시간", systemImage: "slider.horizontal.below.sun.max")
+                        Label(tel.isReactiveMode ? "반응형 타건 단계별 예상 배터리 지속 시간" : "밝기 단계별 예상 배터리 지속 시간", systemImage: "slider.horizontal.below.sun.max")
                             .font(.headline)
 
                         VStack(spacing: 8) {
-                            simulatedRow(levelName: "밝기 4단계 (최대 밝기)", hours: "약 11~12시간", current: vm.brightness == 4)
-                            simulatedRow(levelName: "밝기 3단계 (권장 게이밍)", hours: "약 18~20시간", current: vm.brightness == 3)
-                            simulatedRow(levelName: "밝기 2단계 (은은한 실내)", hours: "약 32~36시간", current: vm.brightness == 2)
-                            simulatedRow(levelName: "밝기 1단계 (초절전 조명)", hours: "약 58~65시간", current: vm.brightness == 1)
-                            simulatedRow(levelName: "조명 OFF (무조명 타이핑)", hours: "약 180~200시간 (최대 8일)", current: vm.brightness == 0)
+                            if tel.isReactiveMode {
+                                simulatedRow(levelName: "반응형 밝기 4단계 (최대)", hours: "약 110~130시간 (상시 대비 10배)", current: vm.brightness == 4)
+                                simulatedRow(levelName: "반응형 밝기 3단계 (권장)", hours: "약 130~150시간", current: vm.brightness == 3)
+                                simulatedRow(levelName: "반응형 밝기 2단계 (은은한)", hours: "약 150~170시간", current: vm.brightness == 2)
+                                simulatedRow(levelName: "반응형 밝기 1단계 (초절전)", hours: "약 170~190시간", current: vm.brightness == 1)
+                                simulatedRow(levelName: "키 미입력 대기 / 조명 OFF", hours: "약 180~220시간", current: vm.brightness == 0)
+                            } else {
+                                simulatedRow(levelName: "밝기 4단계 (최대 밝기)", hours: "약 11~12시간", current: vm.brightness == 4)
+                                simulatedRow(levelName: "밝기 3단계 (권장 게이밍)", hours: "약 18~20시간", current: vm.brightness == 3)
+                                simulatedRow(levelName: "밝기 2단계 (은은한 실내)", hours: "약 32~36시간", current: vm.brightness == 2)
+                                simulatedRow(levelName: "밝기 1단계 (초절전 조명)", hours: "약 58~65시간", current: vm.brightness == 1)
+                                simulatedRow(levelName: "조명 OFF (무조명 타이핑)", hours: "약 180~200시간 (최대 8일)", current: vm.brightness == 0)
+                            }
                         }
 
                         Divider()

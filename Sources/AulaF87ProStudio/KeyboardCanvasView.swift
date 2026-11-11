@@ -22,6 +22,10 @@ struct KeyboardCanvasView: View {
 
     private var needsAnimation: Bool {
         if mode == .effectPreview {
+            if vm.selectedEffect == 12 || vm.selectedEffect == 7 || vm.selectedEffect == 4 {
+                // 반응형 모드: 실제 타건 중이거나 키 잔광 애니메이션 진행 중에만 렌더링 루프 가동 (평상시 암전 대기)
+                return vm.isTypingNow || !vm.activeKeyHits.isEmpty
+            }
             return vm.selectedEffect != 0 && vm.selectedEffect != 1 && vm.selectedEffect != LightingEffect.customPerKeyID
         }
         return vm.sideLightMode == 1 || vm.sideLightMode == 2 || vm.sideLightMode == 4
@@ -358,12 +362,23 @@ struct KeyboardCanvasView: View {
                 }
 
             case 4:
-                // 4. 일촉즉발 (Flash Away): 키를 가로지르는 날카로운 섬광 스캔 + 잔상 감쇠
-                let headX = positiveMod(phase * spdRate * 8.5, 22.0) - 2.0
-                let dist = headX - x
-                let rowMatch = (Int(floor(phase * spdRate * 8.5 / 22.0)) + rowIndex) % 2 == 0
-                let flash = (dist >= 0 && dist < 5.5 && rowMatch) ? exp(-dist * 0.65) : 0.0
-                return tintedColor(hue: x * 0.06 + y * 0.1, intensity: flash, isRainbow: isRainbow, bScale: bScale)
+                // 4. 일촉즉발 (Flash Away): 실제 키 타건에 반응하여 행을 따라 섬광 방출. 평상시 완전 소등(0 mA)
+                var maxFlash = 0.0
+                var flashHue = 0.12
+                for (_, hitTime) in vm.activeKeyHits {
+                    let elapsed = phase - hitTime
+                    guard elapsed >= 0 && elapsed < 0.65 else { continue }
+                    let headX = elapsed * spdRate * 28.0
+                    let dist = abs(headX - x)
+                    if dist < 4.5 {
+                        let f = exp(-dist * 0.7) * exp(-elapsed * 3.5)
+                        if f > maxFlash {
+                            maxFlash = f
+                            flashHue = x * 0.06 + y * 0.1
+                        }
+                    }
+                }
+                return tintedColor(hue: flashHue, intensity: maxFlash, isRainbow: isRainbow, bScale: bScale)
 
             case 5:
                 // 5. 빗방울 (Raindrops): 열마다 서로 다른 속도와 타이밍으로 위에서 아래로 떨어지는 빗방울
@@ -375,12 +390,25 @@ struct KeyboardCanvasView: View {
                 return tintedColor(hue: colSeed + y * 0.05, intensity: trail, isRainbow: isRainbow, bScale: bScale)
 
             case 7:
-                // 7. 물결 확산 (Ripples): 중앙에서 바깥으로 퍼져나가는 동심원 파동 고리
-                let dist = hypot((x - cx) * 0.85, (y - cy) * 1.35)
-                let ringRadius = positiveMod(phase * spdRate * 4.2, 11.5)
-                let ringDiff = abs(dist - ringRadius)
-                let ringIntensity = max(0.0, 1.0 - ringDiff / 1.65)
-                return tintedColor(hue: dist * 0.09 - phase * 0.2, intensity: pow(ringIntensity, 1.5), isRainbow: isRainbow, bScale: bScale)
+                // 7. 물결 확산 (Ripples): 실제 키 타건한 위치를 중심으로 동심원 파동 확산. 평상시 완전 소등(0 mA)
+                var maxRipple = 0.0
+                var waveHue = 0.60
+                for (hitLed, hitTime) in vm.activeKeyHits {
+                    let elapsed = phase - hitTime
+                    guard elapsed >= 0 && elapsed < 1.1 else { continue }
+                    let hitCol = Double(hitLed % 17)
+                    let waveRadius = elapsed * spdRate * 9.5
+                    let dist = hypot((x - hitCol) * 0.9, (y - cy) * 1.3)
+                    let diff = abs(dist - waveRadius)
+                    if diff < 1.8 {
+                        let amp = max(0.0, 1.0 - diff / 1.8) * exp(-elapsed * 2.2)
+                        if amp > maxRipple {
+                            maxRipple = amp
+                            waveHue = dist * 0.08 - elapsed * 0.3
+                        }
+                    }
+                }
+                return tintedColor(hue: waveHue, intensity: pow(maxRipple, 1.4), isRainbow: isRainbow, bScale: bScale)
 
             case 8:
                 // 8. 별빛 반짝임 (Twinkling Stars): 개별 키가 밤하늘의 별처럼 제각기 반짝임
@@ -408,28 +436,31 @@ struct KeyboardCanvasView: View {
                 return tintedColor(hue: diag, intensity: ribbon, isRainbow: isRainbow, bScale: bScale)
 
             case 12:
-                // 12. 반응형 타건 (Reactive): 타이핑하듯 개별 키가 순차적으로 타건되며 주변으로 잔광이 번진 뒤 사라짐
-                var reactiveLevel = 0.0
-                var hitHue = 0.0
-                for slot in 0..<3 {
-                    let stepPeriod = 0.45 / spdRate
-                    let t = phase + Double(slot) * (stepPeriod * 0.33)
-                    let stepIdx = Int(floor(t / stepPeriod))
-                    let localAge = (t - Double(stepIdx) * stepPeriod) / stepPeriod // 0 .. 1
-                    let targetCol = Double((stepIdx * 41 + slot * 19 + 7) % 15)
-                    let targetRow = Double((stepIdx * 23 + slot * 11 + 3) % 6)
-                    let d = hypot(x - targetCol, y - targetRow)
-                    if d < 1.8 {
-                        let spatial = max(0.0, 1.0 - d / 1.8)
-                        let temporal = exp(-localAge * 3.2)
-                        let val = spatial * temporal
-                        if val > reactiveLevel {
-                            reactiveLevel = val
-                            hitHue = Double((stepIdx * 17 + slot * 31) % 100) / 100.0
+                // 12. 반응형 타건 (Reactive): 실제 물리 키보드 타건에 즉각 점등 후 감쇠. 평상시 완전 소등(0 mA)
+                var maxIntensity = 0.0
+                var hitHue = 0.55
+                for (hitLed, hitTime) in vm.activeKeyHits {
+                    let elapsed = phase - hitTime
+                    guard elapsed >= 0 && elapsed < 0.70 else { continue }
+                    if hitLed == key.led {
+                        let selfFade = exp(-elapsed * 4.6)
+                        if selfFade > maxIntensity {
+                            maxIntensity = selfFade
+                            hitHue = Double((hitLed * 17) % 100) / 100.0
+                        }
+                    } else {
+                        // 타건된 키 바로 인접 키로의 미세한 스플래시
+                        let hitCol = Double(hitLed % 17)
+                        let d = abs(x - hitCol)
+                        if d < 1.1 {
+                            let splash = max(0.0, 1.0 - d / 1.1) * exp(-elapsed * 6.5) * 0.35
+                            if splash > maxIntensity {
+                                maxIntensity = splash
+                            }
                         }
                     }
                 }
-                return tintedColor(hue: hitHue, intensity: reactiveLevel, isRainbow: isRainbow, bScale: bScale)
+                return tintedColor(hue: hitHue, intensity: maxIntensity, isRainbow: isRainbow, bScale: bScale)
 
             case 13:
                 // 13. 사인파 웨이브 (Sine Wave): 키보드 상하(Row 0~5)를 실제로 오르락내리락하는 사인 곡선 궤적
