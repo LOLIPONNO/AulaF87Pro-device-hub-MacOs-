@@ -8,11 +8,21 @@ final class HIDPacketCollector {
 
     func push(_ bytes: [UInt8]) {
         guard bytes.count >= 20, bytes[0] == 0x13 else { return }
-        // Check spontaneous battery notification: 13 0A 01 00 04 05 <level> <state>
+        // 1. Spontaneous battery telemetry: 13 4A 01 00 02 <level> <state> ...
+        if (bytes[1] & 0x7F) == 0x4A && bytes[2] == 0x01 && bytes[4] == 0x02 {
+            let level = Int(bytes[5])
+            let state = bytes[6]
+            // State: 0x01 = on battery (discharging), 0x10 / 0x02 = cable plugged in (charging)
+            let charging = (state == 0x10 || (state & 0x10) != 0 || state == 0x02) && state != 0x01
+            if (1...100).contains(level) {
+                latestSpontaneousBattery = BatteryStatus(percent: level, isCharging: charging, updatedAt: .now)
+            }
+        }
+        // 2. Legacy spontaneous battery notification: 13 0A 01 00 04 05 <level> <state>
         if bytes[1] == 0x0A && bytes[2] == 0x01 && bytes[4] == 0x04 && bytes[5] == 0x05 {
             let level = Int(bytes[6])
             let state = bytes[7]
-            let charging = (state != 0x00 && state != 0xFF)
+            let charging = (state == 0x10 || (state & 0x10) != 0 || state == 0x02) && state != 0x01
             if (1...100).contains(level) {
                 latestSpontaneousBattery = BatteryStatus(percent: level, isCharging: charging, updatedAt: .now)
             }
@@ -712,9 +722,8 @@ final class HIDService: @unchecked Sendable {
                             level = Int(pkt[6])
                             state = pkt[7]
                         }
-                        let charging = (state != 0x00 && state != 0xFF) ||
-                                       (pkt[6] != 0x00 && pkt[6] != 0xFF && pkt[6] != UInt8(level)) ||
-                                       (pkt[7] != 0x00 && pkt[7] != 0xFF)
+                        // State: 0x01 = on battery (discharging), 0x10 / 0x02 = cable plugged in (charging)
+                        let charging = (state == 0x10 || (state & 0x10) != 0 || state == 0x02) && state != 0x01
                         if (1...100).contains(level) {
                             cachedBattery = BatteryStatus(percent: level, isCharging: charging, updatedAt: .now)
                         }
