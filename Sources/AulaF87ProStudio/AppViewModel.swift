@@ -3,6 +3,7 @@ import Foundation
 import SwiftUI
 
 enum NavigationTab: String, CaseIterable, Identifiable {
+    case batteryMonitor = "배터리 & 소비 전력 모니터"
     case lighting = "키 백라이트 & 효과"
     case perKey = "개별 키 RGB 페인터"
     case sideLight = "측면 조명 & 라이트바"
@@ -15,6 +16,7 @@ enum NavigationTab: String, CaseIterable, Identifiable {
 
     var symbol: String {
         switch self {
+        case .batteryMonitor: return "bolt.batteryblock.fill"
         case .lighting: return "sparkles"
         case .perKey: return "paintbrush.pointed.fill"
         case .sideLight: return "light.strip.2"
@@ -115,6 +117,30 @@ final class AppViewModel: ObservableObject {
 
     var selectedEffectInfo: LightingEffect {
         LightingEffect.info(for: selectedEffect)
+    }
+
+    var powerTelemetry: PowerTelemetry {
+        PowerTelemetry.calculate(
+            battery: battery,
+            effect: selectedEffect,
+            brightness: brightness,
+            activePerKeyCount: perKeyColors.count,
+            sideLightMode: sideLightMode,
+            lightBarMode: lightBarMode,
+            isWiredUSB: connectionMode.contains("USB")
+        )
+    }
+
+    func applyEcoMode() {
+        selectedEffect = 1 // Static
+        brightness = 1
+        speed = 2
+        colorful = false
+        sideLightMode = 0
+        lightBarMode = 0
+        sleepRawSteps = 2 // 1 min (60s)
+        applyLightingAndSettingsToHardware()
+        showToast("에코 절전 모드가 적용되었습니다 (소비 전력 ~66mW · 최대 약 60시간 지속)")
     }
 
     // MARK: - Connection & Sync

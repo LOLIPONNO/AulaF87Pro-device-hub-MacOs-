@@ -74,6 +74,7 @@ struct ContentView: View {
 
     private var currentCanvasMode: KeyboardCanvasMode {
         switch vm.currentTab {
+        case .batteryMonitor: return .effectPreview
         case .perKey: return .perKeyPainter
         case .keymap: return .keyRemapInspector
         case .music: return vm.isMusicSyncActive ? .musicVisualizer : .effectPreview
@@ -83,6 +84,7 @@ struct ContentView: View {
 
     private var canvasHeaderTitle: String {
         switch vm.currentTab {
+        case .batteryMonitor: return "AULA F87 Pro V1 실시간 하드웨어 전력 & 조명 연동 상태"
         case .perKey: return "87키 TKL 개별 키 RGB 캔버스 (클릭하여 키 색상 지정)"
         case .keymap: return "87키 TKL 키 매핑 인스펙터 (변경할 키를 클릭하세요)"
         case .music: return "87키 TKL 11밴드 오디오 스펙트럼 실시간 프리뷰"
@@ -92,6 +94,11 @@ struct ContentView: View {
 
     private var canvasHintText: String {
         switch vm.currentTab {
+        case .batteryMonitor:
+            let tel = vm.powerTelemetry
+            return tel.isCharging
+                ? "충전 중: 약 \(String(format: "%.2f", tel.chargingPowerW))W (+약 \(Int(tel.chargingCurrentMa))mA) · 완충까지 약 \(formatHours(tel.timeToFullChargeHours))"
+                : "배터리 잔량 \(tel.percent)% · 소비 전력 약 \(String(format: "%.2f", tel.totalPowerW))W (\(Int(tel.totalDischargeCurrentMa))mA) · 약 \(formatHours(tel.remainingUsageHours)) 사용 가능"
         case .perKey: return "색칠된 키: \(vm.perKeyColors.count)개 · 선택된 키: \(vm.selectedLEDs.count)개"
         case .keymap: return "선택된 키: \(vm.selectedKeyForRemap.label) (슬롯 #\(vm.selectedKeyForRemap.led)) · 레이어 \(vm.selectedMatrixLayer)"
         default: return "현재 효과: \(vm.selectedEffectInfo.titleKo) (\(vm.selectedEffectInfo.titleEn)) · 밝기 \(vm.brightness)/4 · 속도 \(vm.speed)/4"
@@ -245,6 +252,8 @@ struct ContentView: View {
     @ViewBuilder
     private var tabDetailContent: some View {
         switch vm.currentTab {
+        case .batteryMonitor:
+            batteryMonitorTabView
         case .lighting:
             lightingTabView
         case .perKey:
@@ -1094,6 +1103,367 @@ struct ContentView: View {
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - 0. Battery & Power Monitor Tab
+
+    private var batteryMonitorTabView: some View {
+        let tel = vm.powerTelemetry
+        return VStack(alignment: .leading, spacing: 18) {
+            // 1. Top 4 KPI Metric Cards
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 14)], spacing: 14) {
+                // Card 1: Battery Level & Cell Voltage
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("배터리 잔량", systemImage: batterySymbol(for: vm.battery ?? BatteryStatus(percent: tel.percent, isCharging: tel.isCharging, updatedAt: .now)))
+                                .font(.subheadline.bold())
+                                .foregroundStyle(batteryColor(for: vm.battery ?? BatteryStatus(percent: tel.percent, isCharging: tel.isCharging, updatedAt: .now)))
+                            Spacer()
+                            Text("\(tel.percent)%")
+                                .font(.system(size: 26, weight: .bold, design: .rounded))
+                                .foregroundStyle(batteryColor(for: vm.battery ?? BatteryStatus(percent: tel.percent, isCharging: tel.isCharging, updatedAt: .now)))
+                        }
+
+                        // Progress Gauge Bar
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(Color.primary.opacity(0.10))
+                                Capsule()
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [tel.percent <= 20 ? .red : (tel.percent <= 40 ? .orange : .green), .cyan],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                                    .frame(width: max(8, geo.size.width * CGFloat(tel.percent) / 100.0))
+                            }
+                        }
+                        .frame(height: 8)
+
+                        HStack {
+                            Text("셀 전압: 약 \(String(format: "%.2f", tel.batteryVoltage))V")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("내장 용량: 4,000 mAh")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(8)
+                }
+
+                // Card 2: Charging Rate & Power In
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(tel.isCharging ? "충전 유입 속도" : "충전 상태", systemImage: tel.isCharging ? "bolt.fill" : "powerplug")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(tel.isCharging ? .green : .secondary)
+                            Spacer()
+                            if tel.isCharging {
+                                Text("\(String(format: "%.2f", tel.chargingPowerW)) W")
+                                    .font(.system(size: 26, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.green)
+                            } else {
+                                Text("미충전")
+                                    .font(.system(size: 20, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        HStack {
+                            if tel.isCharging {
+                                Text("USB 5V 입력 · 유입 전류 약 +\(Int(tel.chargingCurrentMa)) mA")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text("2.4GHz 무선 배터리 방전 구동 중")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+
+                        HStack {
+                            Text(tel.isCharging ? "시간당 약 +17% 충전 속도" : "충전 케이블 연결 시 자동 충전")
+                                .font(.caption2)
+                                .foregroundStyle(tel.isCharging ? .green : .secondary)
+                            Spacer()
+                        }
+                    }
+                    .padding(8)
+                }
+
+                // Card 3: Power Consumption (Discharge Rate)
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label("키보드 소비 전력", systemImage: "gauge.with.dots.needle.bottom.50percent")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(.orange)
+                            Spacer()
+                            Text("\(Int(tel.totalPowerMw)) mW")
+                                .font(.system(size: 26, weight: .bold, design: .rounded))
+                                .foregroundStyle(.orange)
+                        }
+
+                        HStack {
+                            Text("총 소모 전류: 약 \(Int(tel.totalDischargeCurrentMa)) mA")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(String(format: "(%.2f W)", tel.totalPowerW))
+                                .font(.caption2.monospacedDigit().bold())
+                                .foregroundStyle(.orange)
+                        }
+
+                        HStack {
+                            let levelText: String = {
+                                if tel.totalDischargeCurrentMa < 50 { return "초절전 수준 (매우 낮음)" }
+                                if tel.totalDischargeCurrentMa < 140 { return "보통 절전 수준" }
+                                if tel.totalDischargeCurrentMa < 230 { return "표준 게이밍 수준" }
+                                return "최대 화려 조명 소비 수준"
+                            }()
+                            Text("전력 소비 등급: \(levelText)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
+                    .padding(8)
+                }
+
+                // Card 4: Estimated Remaining Battery Life
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Label(tel.isCharging ? "완충 예상 시간" : "예상 사용 시간", systemImage: tel.isCharging ? "hourglass.bottomhalf.filled" : "clock.arrow.circlepath")
+                                .font(.subheadline.bold())
+                                .foregroundStyle(.cyan)
+                            Spacer()
+                            Text(tel.isCharging ? formatHours(tel.timeToFullChargeHours) : formatHours(tel.remainingUsageHours))
+                                .font(.system(size: 22, weight: .bold, design: .rounded))
+                                .foregroundStyle(.cyan)
+                        }
+
+                        HStack {
+                            Text(tel.isCharging ? "현재 배터리 잔량 \(tel.percent)% 기준" : "현재 조명(밝기 \(vm.brightness)단계) 유지 시")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+
+                        HStack {
+                            if tel.isCharging {
+                                Text("완충 시 자동 과충전 방지 모드 작동")
+                                    .font(.caption2)
+                                    .foregroundStyle(.green)
+                            } else {
+                                Text("백라이트 끄면 최대 180시간까지 연장")
+                                    .font(.caption2)
+                                    .foregroundStyle(.cyan)
+                            }
+                            Spacer()
+                        }
+                    }
+                    .padding(8)
+                }
+            }
+
+            // 2. Power Breakdown & Battery Life Simulation
+            HStack(alignment: .top, spacing: 16) {
+                // Left: Component-by-Component Power Breakdown
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            Label("구성 요소별 전력 소모 비중 분석", systemImage: "chart.pie.fill")
+                                .font(.headline)
+                            Spacer()
+                            Text("총 \(Int(tel.totalDischargeCurrentMa)) mA")
+                                .font(.subheadline.bold().monospacedDigit())
+                                .foregroundStyle(.cyan)
+                        }
+
+                        let mainRatio = tel.totalDischargeCurrentMa > 0 ? (tel.mainLedsCurrentMa / tel.totalDischargeCurrentMa) : 0
+                        let sideRatio = tel.totalDischargeCurrentMa > 0 ? (tel.sideLedsCurrentMa / tel.totalDischargeCurrentMa) : 0
+                        let mcuRatio = tel.totalDischargeCurrentMa > 0 ? (tel.mcuCurrentMa / tel.totalDischargeCurrentMa) : 0
+
+                        powerBarRow(
+                            title: "87키 메인 백라이트 LED (현재 밝기 \(vm.brightness)단계)",
+                            ma: Int(tel.mainLedsCurrentMa),
+                            ratio: mainRatio,
+                            color: .pink
+                        )
+
+                        powerBarRow(
+                            title: "양측면 RGB 스트립 & 방향키 라이트바",
+                            ma: Int(tel.sideLedsCurrentMa),
+                            ratio: sideRatio,
+                            color: .purple
+                        )
+
+                        powerBarRow(
+                            title: "2.4GHz 무선 RF 트랜시버 & 32비트 MCU",
+                            ma: Int(tel.mcuCurrentMa),
+                            ratio: mcuRatio,
+                            color: .cyan
+                        )
+
+                        Divider()
+
+                        HStack(spacing: 12) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(.secondary)
+                            Text("AULA F87 Pro는 87개의 독립 RGB LED가 전체 전력의 70% 이상을 차지합니다. 배터리를 오래 쓰려면 밝기를 1~2단계로 낮추는 것이 가장 효과적입니다.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                // Right: Battery Life Simulation & One-Click Eco Optimizer
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Label("밝기 단계별 예상 배터리 지속 시간", systemImage: "slider.horizontal.below.sun.max")
+                            .font(.headline)
+
+                        VStack(spacing: 8) {
+                            simulatedRow(levelName: "밝기 4단계 (최대 밝기)", hours: "약 11~12시간", current: vm.brightness == 4)
+                            simulatedRow(levelName: "밝기 3단계 (권장 게이밍)", hours: "약 18~20시간", current: vm.brightness == 3)
+                            simulatedRow(levelName: "밝기 2단계 (은은한 실내)", hours: "약 32~36시간", current: vm.brightness == 2)
+                            simulatedRow(levelName: "밝기 1단계 (초절전 조명)", hours: "약 58~65시간", current: vm.brightness == 1)
+                            simulatedRow(levelName: "조명 OFF (무조명 타이핑)", hours: "약 180~200시간 (최대 8일)", current: vm.brightness == 0)
+                        }
+
+                        Divider()
+
+                        HStack(spacing: 10) {
+                            Button {
+                                vm.applyEcoMode()
+                            } label: {
+                                Label("에코 절전 모드 적용 (~60시간)", systemImage: "leaf.fill")
+                                    .fontWeight(.semibold)
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                            .disabled(vm.isBusy || !vm.isConnected)
+
+                            Button {
+                                vm.brightness = 0
+                                vm.sideLightMode = 0
+                                vm.lightBarMode = 0
+                                vm.sleepRawSteps = 2
+                                vm.applyLightingAndSettingsToHardware()
+                                vm.showToast("최대 배터리 절약 모드가 적용되었습니다 (조명 완전 OFF)")
+                            } label: {
+                                Label("조명 완전 OFF (최장 180h)", systemImage: "poweroff")
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(vm.isBusy || !vm.isConnected)
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            // 3. Hardware Health & Specifications Summary
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("AULA F87 Pro V1 배터리 및 전원 하드웨어 스펙", systemImage: "checkmark.shield.fill")
+                        .font(.headline)
+
+                    HStack(spacing: 24) {
+                        specItem("배터리 용량", "4,000 mAh (14.8 Wh)")
+                        specItem("정격 전압", "3.7V (충전 완료 4.2V)")
+                        specItem("권장 충전 규격", "5V 1A ~ 2A USB")
+                        specItem("충전 IC 보호", "과충전 / 과방전 보호 회로 내장")
+                        specItem("현재 절전 타이머", "\(vm.sleepRawSteps * 30)초 후 자동 슬립")
+                    }
+                    .padding(.top, 4)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private func powerBarRow(title: String, ma: Int, ratio: Double, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title)
+                    .font(.caption.bold())
+                Spacer()
+                Text("\(ma) mA (\(Int((ratio * 100).rounded()))%)")
+                    .font(.caption.monospacedDigit().bold())
+                    .foregroundStyle(color)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.08))
+                    Capsule()
+                        .fill(color)
+                        .frame(width: max(4, geo.size.width * CGFloat(min(1.0, ratio))))
+                }
+            }
+            .frame(height: 6)
+        }
+    }
+
+    private func simulatedRow(levelName: String, hours: String, current: Bool) -> some View {
+        HStack {
+            Circle()
+                .fill(current ? Color.cyan : Color.primary.opacity(0.18))
+                .frame(width: 7, height: 7)
+            Text(levelName)
+                .font(.system(size: 12.5, weight: current ? .bold : .regular))
+                .foregroundStyle(current ? Color.cyan : Color.primary)
+            Spacer()
+            Text(hours)
+                .font(.system(size: 12.5, weight: .bold, design: .rounded))
+                .foregroundStyle(current ? Color.cyan : Color.secondary)
+            if current {
+                Text("(현재)")
+                    .font(.caption2.bold())
+                    .foregroundStyle(Color.cyan)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(current ? Color.cyan.opacity(0.12) : Color.clear)
+        )
+    }
+
+    private func specItem(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.bold())
+        }
+    }
+
+    private func formatHours(_ hours: Double) -> String {
+        guard hours > 0 else { return "0분" }
+        let h = Int(hours)
+        let m = Int(((hours - Double(h)) * 60).rounded())
+        if h == 0 {
+            return "\(m)분"
+        } else if m == 0 {
+            return "\(h)시간"
+        } else {
+            return "\(h)시간 \(m)분"
         }
     }
 

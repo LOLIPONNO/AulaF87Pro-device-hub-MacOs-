@@ -545,6 +545,103 @@ struct BatteryStatus: Equatable, Sendable {
     let updatedAt: Date
 }
 
+struct PowerTelemetry: Sendable {
+    let percent: Int
+    let isCharging: Bool
+    let capacityMah: Int          // 4000 mAh
+    let batteryVoltage: Double    // 3.5V ~ 4.2V
+    let mcuCurrentMa: Double      // ~18 mA
+    let mainLedsCurrentMa: Double // 0 ~ 295 mA
+    let sideLedsCurrentMa: Double // 0 ~ 74 mA
+    let totalDischargeCurrentMa: Double
+    let totalPowerMw: Double      // Total consumption in milliwatts
+    let totalPowerW: Double       // Total consumption in watts
+    let chargingCurrentMa: Double // ~650 mA (5V USB input)
+    let chargingPowerW: Double    // ~3.25 W
+    let remainingUsageHours: Double
+    let timeToFullChargeHours: Double
+
+    static func calculate(
+        battery: BatteryStatus?,
+        effect: Int,
+        brightness: Int,
+        activePerKeyCount: Int,
+        sideLightMode: Int,
+        lightBarMode: Int,
+        isWiredUSB: Bool
+    ) -> PowerTelemetry {
+        let pct = battery?.percent ?? 36
+        let charging = battery?.isCharging ?? false
+        let capacity = 4000 // AULA F87 Pro V1 4000mAh Li-ion battery
+
+        let v: Double = charging
+            ? 3.85 + (Double(pct) / 100.0) * 0.35
+            : 3.50 + (Double(pct) / 100.0) * 0.65
+
+        let mcu: Double = isWiredUSB ? 24.0 : 18.0
+
+        let mainLeds: Double
+        if effect == 0 || brightness == 0 {
+            mainLeds = 0.0
+        } else if effect == LightingEffect.customPerKeyID {
+            let scale = Double(max(1, brightness)) / 4.0
+            mainLeds = Double(activePerKeyCount) * 2.8 * scale
+        } else {
+            switch brightness {
+            case 1: mainLeds = 48.0
+            case 2: mainLeds = 112.0
+            case 3: mainLeds = 196.0
+            case 4: mainLeds = 295.0
+            default: mainLeds = 0.0
+            }
+        }
+
+        let sideLeds: Double = (sideLightMode == 0 ? 0.0 : (sideLightMode == 3 ? 36.0 : 52.0))
+            + (lightBarMode == 0 ? 0.0 : 22.0)
+
+        let totalDischarge = mcu + mainLeds + sideLeds
+        let powerMw = totalDischarge * v
+        let powerW = powerMw / 1000.0
+
+        let chgCurrent: Double
+        if charging {
+            // Constant Current (CC) phase up to ~85%, then gentle Constant Voltage (CV) taper
+            if pct < 85 {
+                chgCurrent = 680.0
+            } else {
+                chgCurrent = 680.0 * max(0.25, Double(100 - pct) / 15.0)
+            }
+        } else {
+            chgCurrent = 0.0
+        }
+        let chgPowerW = charging ? (chgCurrent * 5.0 / 1000.0) : 0.0
+
+        let remainingMah = Double(capacity) * (Double(pct) / 100.0)
+        let usageHours = max(0.5, remainingMah / max(12.0, totalDischarge))
+
+        let neededMah = Double(capacity) * (Double(100 - pct) / 100.0)
+        let netChargeCurrent = max(120.0, chgCurrent - (isWiredUSB ? 0 : totalDischarge))
+        let chargeHours = charging ? max(0.1, neededMah / netChargeCurrent) : 0.0
+
+        return PowerTelemetry(
+            percent: pct,
+            isCharging: charging,
+            capacityMah: capacity,
+            batteryVoltage: v,
+            mcuCurrentMa: mcu,
+            mainLedsCurrentMa: mainLeds,
+            sideLedsCurrentMa: sideLeds,
+            totalDischargeCurrentMa: totalDischarge,
+            totalPowerMw: powerMw,
+            totalPowerW: powerW,
+            chargingCurrentMa: chgCurrent,
+            chargingPowerW: chgPowerW,
+            remainingUsageHours: usageHours,
+            timeToFullChargeHours: chargeHours
+        )
+    }
+}
+
 struct HardwareSnapshot: Sendable {
     let connectionMode: String // "2.4GHz 무선 (3554:FA09)" or "USB 유선 (258A:010C)"
     let modelName: String      // "AULA F87 Pro V1"
