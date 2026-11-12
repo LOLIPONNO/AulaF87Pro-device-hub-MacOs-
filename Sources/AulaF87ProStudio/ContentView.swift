@@ -305,6 +305,11 @@ struct ContentView: View {
                     HStack {
                         Label("백라이트 조명 효과 (16종)", systemImage: "sparkles")
                             .font(.headline)
+                        if vm.connectionMode.contains("Bluetooth") {
+                            Text("(Fn + Ins 단축키 지원)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         Spacer()
                         Button("선택한 효과 키보드에 저장") {
                             vm.applyLightingAndSettingsToHardware()
@@ -317,10 +322,7 @@ struct ContentView: View {
                         ForEach(LightingEffect.all) { effect in
                             let selected = vm.selectedEffect == effect.id
                             Button {
-                                vm.selectedEffect = effect.id
-                                if !effect.supportsColor && effect.id != 0 {
-                                    vm.colorful = true
-                                }
+                                vm.selectLightingEffect(effect.id)
                             } label: {
                                 HStack(spacing: 10) {
                                     Image(systemName: effect.icon)

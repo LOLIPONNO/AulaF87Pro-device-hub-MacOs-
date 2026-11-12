@@ -434,9 +434,6 @@ final class HIDService: @unchecked Sendable {
         debounceStage: Int,
         tapSensitivity: Int
     ) throws -> HardwareSnapshot {
-        if case .bluetoothLE = activeTransport {
-            _ = try? connectAndReadSnapshot()
-        }
         guard let activeTransport else { throw F87ProtocolError.deviceNotFound }
         switch activeTransport {
         case .wiredUSB(let dev):
@@ -516,7 +513,7 @@ final class HIDService: @unchecked Sendable {
             saveGoodConfigBackup(updated)
             return F87Protocol.parseSnapshot(
                 rawConfig: updated,
-                connectionMode: "Bluetooth 5.0 (프로필 예약됨 · 2.4G 리시버 또는 USB 연결 시 하드웨어 반영)",
+                connectionMode: "Bluetooth 5.0 (AULA-F87Pro 5.0 · 3554:FA07)",
                 modelName: cachedModelName,
                 battery: cachedBattery
             )

@@ -387,15 +387,15 @@ final class AppViewModel: ObservableObject {
                 DispatchQueue.main.async {
                     let changed = (self.connectionMode != snap.connectionMode) || !self.isConnected
                     self.isConnected = true
-                    self.applySnapshotToUI(snap)
-                    self.statusTitle = "\(snap.modelName) 연결됨"
-                    self.statusDetail = nil
-                    self.consecutivePollFailures = 0
-                    self.checkAlDenteNotification()
                     if changed {
+                        self.applySnapshotToUI(snap)
+                        self.statusTitle = "\(snap.modelName) 연결됨"
+                        self.statusDetail = nil
                         self.log("하드웨어 연결 변경 감지: \(snap.modelName) (\(snap.connectionMode))")
                         self.showToast("연결 감지: \(snap.connectionMode)")
                     }
+                    self.consecutivePollFailures = 0
+                    self.checkAlDenteNotification()
                 }
             } else if !service.isConnected {
                 DispatchQueue.main.async {
@@ -563,7 +563,7 @@ final class AppViewModel: ObservableObject {
                 self.activeKeyHits = self.activeKeyHits.filter { refNow - $0.value < 1.5 }
 
                 let service = self.hidService
-                let shouldTryUpgrade = !self.isConnected || self.connectionMode.contains("Bluetooth") || self.connectionMode.contains("절전")
+                let shouldReconnect = !self.isConnected || self.connectionMode.contains("절전")
                 self.isPollingHID = true
                 self.hidQueue.async { [weak self] in
                     defer {
@@ -571,21 +571,21 @@ final class AppViewModel: ObservableObject {
                             self?.isPollingHID = false
                         }
                     }
-                    if shouldTryUpgrade {
+                    if shouldReconnect {
                         if let snap = try? service.connectAndReadSnapshot() {
                             DispatchQueue.main.async {
                                 guard let self else { return }
                                 let changedMode = (self.connectionMode != snap.connectionMode) || !self.isConnected
                                 self.isConnected = true
-                                self.applySnapshotToUI(snap)
-                                self.statusTitle = "\(snap.modelName) 연결됨"
-                                self.statusDetail = nil
-                                self.consecutivePollFailures = 0
-                                self.checkAlDenteNotification()
                                 if changedMode {
+                                    self.applySnapshotToUI(snap)
+                                    self.statusTitle = "\(snap.modelName) 연결됨"
+                                    self.statusDetail = nil
                                     self.log("자동 연결 감지: \(snap.modelName) (\(snap.connectionMode))")
                                     self.showToast("\(snap.connectionMode) 연결됨")
                                 }
+                                self.consecutivePollFailures = 0
+                                self.checkAlDenteNotification()
                             }
                         }
                     } else if let outcome = service.pollBatteryAndLatency() {
@@ -744,6 +744,15 @@ final class AppViewModel: ObservableObject {
 
     // MARK: - Lighting & Hardware Settings Apply
 
+    func selectLightingEffect(_ id: Int) {
+        selectedEffect = id
+        let info = LightingEffect.info(for: id)
+        if !info.supportsColor && id != 0 {
+            colorful = true
+        }
+        applyLightingAndSettingsToHardware()
+    }
+
     func applyLightingAndSettingsToHardware() {
         guard !isBusy else { return }
         stopMusicSyncIfNeeded()
@@ -784,7 +793,11 @@ final class AppViewModel: ObservableObject {
                     self.statusTitle = "\(snap.modelName) 연결됨"
                     self.statusDetail = nil
                     self.log("설정 적용 완료: 효과=\(LightingEffect.info(for: eff).titleKo), 밝기=\(bri), 속도=\(spd), 측면=\(side), 디바운스=\(deb)단계")
-                    self.showToast("키보드에 설정이 저장되었습니다")
+                    if self.connectionMode.contains("Bluetooth") {
+                        self.showToast("효과 저장 완료: '\(LightingEffect.info(for: eff).titleKo)' (블루투스 모드에서는 키보드의 Fn + Ins 키로도 순환 전환 가능)")
+                    } else {
+                        self.showToast("조명 효과 '\(LightingEffect.info(for: eff).titleKo)'(으)로 적용되었습니다")
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
