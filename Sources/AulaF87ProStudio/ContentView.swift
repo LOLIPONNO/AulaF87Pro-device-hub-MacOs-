@@ -62,6 +62,13 @@ struct ContentView: View {
             .animation(.easeInOut(duration: 0.2), value: vm.toastMessage)
         }
         .frame(minWidth: 1080, minHeight: 760)
+        .overlay {
+            if vm.isLowBatteryBannerVisible {
+                lowBatteryFullBannerView
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.8), value: vm.isLowBatteryBannerVisible)
         .alert("키보드 설정을 공장 초기값으로 복원할까요?", isPresented: $showResetConfirm) {
             Button("취소", role: .cancel) {}
             Button("공장 초기화 실행", role: .destructive) {
@@ -1583,6 +1590,58 @@ struct ContentView: View {
                 .padding(8)
             }
 
+            // Low Battery 10% Warning Banner Settings Card
+            GroupBox {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "battery.0percent")
+                            .font(.system(size: 26))
+                            .foregroundStyle(vm.effectiveBattery.percent <= 10 && !vm.isEffectiveCharging ? Color.red : Color.orange)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text("배터리 10% 이하 전체 화면 긴급 경고 배너")
+                                    .font(.system(size: 14, weight: .bold))
+                                if vm.isLowBatteryWarningEnabled {
+                                    HStack(spacing: 4) {
+                                        Circle().fill(Color.green).frame(width: 7, height: 7)
+                                        Text("자동 감지 경고 활성화됨")
+                                            .font(.caption2.bold())
+                                            .foregroundStyle(Color.green)
+                                    }
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 3)
+                                    .background(Capsule().fill(Color.green.opacity(0.12)))
+                                }
+                            }
+                            Text("배터리가 10% 이하로 떨어지면 무선 연결 차단을 방지하기 위해 화면 전체에 대형 경고 배너를 띄우고 시스템 알림과 사운드를 발생시킵니다.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $vm.isLowBatteryWarningEnabled)
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    }
+                    Divider()
+                    HStack {
+                        Text("• USB 충전 케이블 연결 시 배너가 자동으로 즉시 닫힙니다.\n• 긴급 시 '10분 동안 닫기' 또는 '조명 끄고 긴급 절전'을 바로 실행할 수 있습니다.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button {
+                            vm.showLowBatteryTestBanner()
+                        } label: {
+                            Label("경고 배너 화면에 띄우기 테스트", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption2.bold())
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.small)
+                    }
+                }
+                .padding(8)
+            }
+
             // Real-Time Hardware Latency & Polling Rate Benchmark Card
             GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
@@ -1987,5 +2046,105 @@ struct ContentView: View {
         if bat.percent <= 20 { return .red }
         if bat.percent <= 40 { return .orange }
         return .green
+    }
+
+    // MARK: - Low Battery Full-Screen Alert Banner
+    private var lowBatteryFullBannerView: some View {
+        ZStack {
+            Color.black.opacity(0.65)
+                .background(.ultraThinMaterial)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    vm.dismissLowBatteryBanner(snoozeMinutes: 5)
+                }
+
+            VStack(spacing: 20) {
+                HStack(spacing: 16) {
+                    ZStack {
+                        Circle().fill(Color.red.opacity(0.25)).frame(width: 64, height: 64)
+                        Circle().stroke(Color.red, lineWidth: 2).frame(width: 54, height: 54)
+                        Image(systemName: "battery.0percent")
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundStyle(.red)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text("🚨 키보드 배터리 부족 경고 (10% 이하)")
+                                .font(.system(size: 22, weight: .black, design: .rounded))
+                                .foregroundStyle(.red)
+                            Text("\(vm.effectiveBattery.percent)%")
+                                .font(.system(size: 18, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.red))
+                                .foregroundStyle(.white)
+                        }
+                        Text("키보드 전원이 곧 꺼질 수 있습니다. 무선 연결 차단을 방지하기 위해 지금 즉시 충전 케이블을 연결해주세요.")
+                            .font(.subheadline)
+                            .foregroundStyle(.primary)
+                    }
+                    Spacer()
+                    Button {
+                        vm.dismissLowBatteryBanner(snoozeMinutes: 10)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.title2)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                Divider()
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "antenna.radiowaves.left.and.right").foregroundStyle(.cyan)
+                            Text("현재 연결:").font(.caption.bold())
+                            Text(vm.connectionMode).font(.caption).foregroundStyle(.secondary)
+                        }
+                        HStack(spacing: 6) {
+                            Image(systemName: "clock.badge.exclamationmark").foregroundStyle(.orange)
+                            Text("예상 잔여 시간:").font(.caption.bold())
+                            Text(formatHours(vm.powerTelemetry.remainingUsageHours)).font(.caption.bold()).foregroundStyle(.orange)
+                        }
+                        HStack(spacing: 6) {
+                            Image(systemName: "bolt.fill").foregroundStyle(.green)
+                            Text("케이블 연결 시:").font(.caption.bold())
+                            Text("USB-C 충전기 연결 즉시 배너가 자동 해제됩니다").font(.caption).foregroundStyle(.green)
+                        }
+                    }
+                    Spacer()
+                    VStack(alignment: .trailing, spacing: 10) {
+                        Button {
+                            vm.applyEmergencyEcoMode()
+                        } label: {
+                            Label("조명 끄고 긴급 절전 모드 실행", systemImage: "lightbulb.slash.fill")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        Button {
+                            vm.dismissLowBatteryBanner(snoozeMinutes: 10)
+                        } label: {
+                            Text("10분 동안 닫기 (작업 계속)").font(.caption)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding(26)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor))
+                    .shadow(color: Color.red.opacity(0.40), radius: 35, x: 0, y: 12)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(LinearGradient(colors: [Color.red, Color.orange, Color.red], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: 2.5)
+                    )
+            )
+            .frame(maxWidth: 720)
+            .padding(.horizontal, 32)
+        }
     }
 }

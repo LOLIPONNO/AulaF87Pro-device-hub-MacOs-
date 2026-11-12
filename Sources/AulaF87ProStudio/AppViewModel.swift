@@ -139,6 +139,19 @@ final class AppViewModel: ObservableObject {
     @Published var isAlDenteTriggered: Bool = false
     private var lastAlDenteAlertTime: Date?
 
+    // Low Battery (10% or below) Full-Screen Warning Banner State
+    @Published var isLowBatteryBannerVisible: Bool = false
+    @Published var isLowBatteryWarningEnabled: Bool = {
+        UserDefaults.standard.object(forKey: "lowBatteryWarningEnabled") as? Bool ?? true
+    }() {
+        didSet {
+            UserDefaults.standard.set(isLowBatteryWarningEnabled, forKey: "lowBatteryWarningEnabled")
+            checkLowBatteryWarning()
+        }
+    }
+    @Published var lowBatteryDismissedUntil: Date? = nil
+    private var lastLowBatteryAlertTime: Date?
+
     var isEffectiveCharging: Bool {
         (battery?.isCharging ?? false) || connectionMode.contains("USB")
     }
@@ -407,6 +420,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func checkAlDenteNotification() {
+        checkLowBatteryWarning()
+
         guard isAlDenteEnabled, let bat = battery else {
             isAlDenteTriggered = false
             return
@@ -428,6 +443,68 @@ final class AppViewModel: ObservableObject {
             sendAlDenteSystemNotification(percent: bat.percent, limit: alDenteLimitPercent)
             showToast("🛡️ [AlDente 배터리 보호] \(alDenteLimitPercent)% 충전 한계에 도달했습니다! 케이블을 분리해주세요.")
         }
+    }
+
+    func checkLowBatteryWarning() {
+        guard isLowBatteryWarningEnabled, let bat = battery, isConnected else {
+            return
+        }
+
+        let isLow = bat.percent <= 10 && !isEffectiveCharging
+
+        if isLow {
+            let now = Date()
+            if let snooze = lowBatteryDismissedUntil, now < snooze {
+                isLowBatteryBannerVisible = false
+                return
+            }
+
+            if !isLowBatteryBannerVisible {
+                isLowBatteryBannerVisible = true
+                if let last = lastLowBatteryAlertTime, now.timeIntervalSince(last) < 300 {
+                    // Suppress repeated alert beep
+                } else {
+                    lastLowBatteryAlertTime = now
+                    NSSound.beep()
+                    sendLowBatterySystemNotification(percent: bat.percent)
+                }
+            }
+        } else {
+            isLowBatteryBannerVisible = false
+            lowBatteryDismissedUntil = nil
+        }
+    }
+
+    private func sendLowBatterySystemNotification(percent: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "⚠️ AULA F87 Pro 배터리 부족 (10% 이하)"
+        content.subtitle = "현재 잔량 \(percent)% · 전원 차단 방지"
+        content.body = "키보드 배터리가 10% 이하로 소진되었습니다. 무선 연결 차단을 방지하기 위해 즉시 USB 충전 케이블을 연결해주세요."
+        content.sound = .default
+
+        let request = UNNotificationRequest(identifier: "low-bat-\(Date().timeIntervalSince1970)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { _ in }
+    }
+
+    func dismissLowBatteryBanner(snoozeMinutes: Double = 10) {
+        isLowBatteryBannerVisible = false
+        lowBatteryDismissedUntil = Date().addingTimeInterval(snoozeMinutes * 60)
+        showToast("배터리 부족 경고가 \(Int(snoozeMinutes))분 동안 일시 숨김 처리되었습니다.")
+    }
+
+    func showLowBatteryTestBanner() {
+        lowBatteryDismissedUntil = nil
+        isLowBatteryBannerVisible = true
+        NSSound.beep()
+        showToast("배터리 10% 이하 긴급 경고 배너가 화면에 표시되었습니다.")
+    }
+
+    func applyEmergencyEcoMode() {
+        brightness = 0
+        sideLightMode = 0
+        lightBarMode = 0
+        applyLightingAndSettingsToHardware()
+        showToast("긴급 절전: 모든 백라이트 및 측면 조명이 즉시 꺼졌습니다.")
     }
 
     private func sendAlDenteSystemNotification(percent: Int, limit: Int) {
