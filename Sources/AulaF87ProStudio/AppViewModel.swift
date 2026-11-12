@@ -753,6 +753,16 @@ final class AppViewModel: ObservableObject {
         applyLightingAndSettingsToHardware()
     }
 
+    func selectSideLightMode(_ mode: Int) {
+        sideLightMode = mode
+        applyLightingAndSettingsToHardware()
+    }
+
+    func selectLightBarMode(_ mode: Int) {
+        lightBarMode = mode
+        applyLightingAndSettingsToHardware()
+    }
+
     func applyLightingAndSettingsToHardware() {
         guard !isBusy else { return }
         stopMusicSyncIfNeeded()

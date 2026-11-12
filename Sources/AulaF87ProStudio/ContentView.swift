@@ -595,7 +595,7 @@ struct ContentView: View {
                     ForEach(SideLightMode.all) { mode in
                         let selected = vm.sideLightMode == mode.id
                         Button {
-                            vm.sideLightMode = mode.id
+                            vm.selectSideLightMode(mode.id)
                         } label: {
                             HStack {
                                 Image(systemName: mode.icon)
@@ -633,30 +633,83 @@ struct ContentView: View {
 
             GroupBox {
                 VStack(alignment: .leading, spacing: 14) {
-                    Label("방향키 상단 라이트바 & 하드웨어 단축키 안내", systemImage: "sparkles.rectangle.stack")
+                    Label("방향키 상단 라이트바 (Arrow Keys Light Bar)", systemImage: "sparkles.rectangle.stack")
                         .font(.headline)
-
-                    Picker("상단 라이트바 모드", selection: $vm.lightBarMode) {
-                        ForEach(SideLightMode.all) { mode in
-                            Text(mode.titleKo).tag(mode.id)
-                        }
-                    }
-
-                    Text("※ 참고: AULA F87 Pro 펌웨어 특성상 방향키 상단 라이트바는 키보드 자체 단축키(Fn + Left Shift)로 전환할 때 가장 확실하게 반영됩니다.")
+                    Text("방향키 상단에 위치한 RGB 앰비언트 인디케이터 바의 모드를 설정합니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    if vm.connectionMode.contains("Bluetooth") {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("블루투스 무선 모드 실시간 제어 안내:")
+                                    .font(.caption.bold())
+                                    .foregroundStyle(.orange)
+                                Text("블루투스 모드에서는 키보드 자체 단축키인 [Fn + 왼쪽 Shift]를 누르면 방향키 상단 라이트바 모드가 실시간으로 즉시 전환됩니다.\n(단색 컬러 순환: Fn + Z · 배터리 인디케이터: Fn + B)\n2.4GHz 무선 동글 또는 USB 케이블로 연결 시 앱에서 직접 원클릭 제어됩니다.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(8)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.10)))
+                    }
+
+                    ForEach(SideLightMode.all) { mode in
+                        let selected = vm.lightBarMode == mode.id
+                        Button {
+                            vm.selectLightBarMode(mode.id)
+                        } label: {
+                            HStack {
+                                Image(systemName: mode.icon)
+                                    .foregroundStyle(selected ? Color.cyan : Color.secondary)
+                                    .frame(width: 24)
+                                Text(mode.titleKo)
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text("(\(mode.titleEn))")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                                if selected {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(Color.cyan)
+                                }
+                            }
+                            .padding(10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(selected ? Color.cyan.opacity(0.15) : Color.primary.opacity(0.04))
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    HStack {
+                        Button("라이트바 설정 저장") {
+                            vm.applyLightingAndSettingsToHardware()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(vm.isBusy || !vm.isConnected)
+
+                        Button("라이트바 끄기 (0mA 절전)") {
+                            vm.selectLightBarMode(0)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(vm.isBusy || !vm.isConnected)
+                    }
 
                     Divider()
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("F87 Pro V1 필수 하드웨어 FN 단축키")
+                        Text("AULA F87 Pro V1 필수 하드웨어 단축키")
                             .font(.subheadline.bold())
-                        shortcutRow("Fn + B", "라이트바로 실시간 배터리 잔량 확인 (초록=충분, 빨강=부족)")
-                        shortcutRow("Fn + Right Shift", "좌우 측면 RGB 조명 모드 순환")
-                        shortcutRow("Fn + Left Shift", "방향키 위 라이트바 모드 순환")
+                        shortcutRow("Fn + 왼쪽 Shift", "방향키 상단 라이트바 모드 순환 및 ON/OFF (즉시 반영)")
+                        shortcutRow("Fn + Z", "방향키 상단 라이트바 7가지 단색 컬러 순환 변경")
+                        shortcutRow("Fn + B", "방향키 상단 라이트바로 배터리 실시간 잔량 표시 (초록/빨강)")
+                        shortcutRow("Fn + 오른쪽 Shift", "좌우 측면 RGB 조명 모드 순환")
                         shortcutRow("Fn + Ins / Del", "메인 백라이트 효과 전환 / 색상 전환")
                         shortcutRow("Fn + ↑ / ↓ / ← / →", "백라이트 밝기 조절 / 애니메이션 속도 조절")
-                        shortcutRow("Fn + W / E", "Windows 모드 전환 (Fn+W) / Mac 모드 전환 (Fn+E)")
                     }
                 }
                 .padding(8)
