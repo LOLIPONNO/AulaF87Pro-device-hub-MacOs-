@@ -1,6 +1,101 @@
 import Foundation
 import IOKit.hid
 import QuartzCore
+import CoreBluetooth
+
+final class BLEBatteryMonitor: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, @unchecked Sendable {
+    private var central: CBCentralManager?
+    private var targetPeripheral: CBPeripheral?
+    private var batteryChar: CBCharacteristic?
+    private let queue = DispatchQueue(label: "com.antigravity.aulaf87pro.ble", qos: .utility)
+
+    var onBatteryUpdate: (@Sendable (Int) -> Void)?
+    private(set) var lastKnownPercent: Int?
+
+    override init() {
+        super.init()
+        self.central = CBCentralManager(delegate: self, queue: queue)
+    }
+
+    func startMonitoring() {
+        queue.async { [weak self] in
+            guard let self, let central = self.central else { return }
+            if central.state == .poweredOn {
+                self.scanConnected()
+            }
+        }
+    }
+
+    func poll() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            if let p = self.targetPeripheral, let c = self.batteryChar {
+                p.readValue(for: c)
+            } else {
+                self.scanConnected()
+            }
+        }
+    }
+
+    private func scanConnected() {
+        guard let central, central.state == .poweredOn else { return }
+        let batteryUUID = CBUUID(string: "180F")
+        let hidUUID = CBUUID(string: "1812")
+        let peripherals = central.retrieveConnectedPeripherals(withServices: [batteryUUID, hidUUID])
+        for p in peripherals {
+            let name = p.name ?? ""
+            if name.contains("AULA") || name.contains("F87") {
+                self.targetPeripheral = p
+                p.delegate = self
+                central.connect(p, options: nil)
+                break
+            }
+        }
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        if central.state == .poweredOn {
+            scanConnected()
+        }
+    }
+
+    func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        peripheral.discoverServices([CBUUID(string: "180F")])
+    }
+
+    func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
+        if targetPeripheral == peripheral {
+            batteryChar = nil
+            scanConnected()
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
+        for s in peripheral.services ?? [] {
+            if s.uuid == CBUUID(string: "180F") {
+                peripheral.discoverCharacteristics([CBUUID(string: "2A19")], for: s)
+            }
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        for c in service.characteristics ?? [] {
+            if c.uuid == CBUUID(string: "2A19") {
+                self.batteryChar = c
+                peripheral.readValue(for: c)
+                peripheral.setNotifyValue(true, for: c)
+            }
+        }
+    }
+
+    func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
+        if let data = characteristic.value, !data.isEmpty {
+            let pct = max(1, min(100, Int(data[0])))
+            self.lastKnownPercent = pct
+            self.onBatteryUpdate?(pct)
+        }
+    }
+}
 
 final class HIDPacketCollector {
     var packets: [[UInt8]] = []
@@ -63,9 +158,10 @@ final class HIDService: @unchecked Sendable {
     private let collector = HIDPacketCollector()
     private let reportBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
     private(set) var cachedModelName: String = "AULA F87 Pro V1"
-    private(set) var cachedBattery: BatteryStatus? = BatteryStatus(percent: 49, isCharging: false, updatedAt: .now)
+    private(set) var cachedBattery: BatteryStatus? = BatteryStatus(percent: 81, isCharging: false, updatedAt: .now)
     private(set) var lastMeasuredRttMs: Double = 2.1
     var onDeviceStateChange: (@Sendable () -> Void)?
+    private let bleMonitor = BLEBatteryMonitor()
 
     private let backupDirectory: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -74,7 +170,15 @@ final class HIDService: @unchecked Sendable {
         return dir
     }()
 
-    init() {}
+    init() {
+        bleMonitor.onBatteryUpdate = { [weak self] pct in
+            guard let self else { return }
+            let chg = self.cachedBattery?.isCharging ?? false
+            self.cachedBattery = BatteryStatus(percent: pct, isCharging: chg, updatedAt: .now)
+            self.onDeviceStateChange?()
+        }
+        bleMonitor.startMonitoring()
+    }
 
     deinit {
         disconnect()
@@ -262,6 +366,10 @@ final class HIDService: @unchecked Sendable {
                     }
                 } else if pid == F87Protocol.bluetoothPID {
                     activeTransport = .bluetoothLE(dev)
+                    bleMonitor.poll()
+                    let pct = bleMonitor.lastKnownPercent ?? cachedBattery?.percent ?? 81
+                    let bat = BatteryStatus(percent: pct, isCharging: false, updatedAt: .now)
+                    cachedBattery = bat
                     let fallbackCfg = loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
                     return F87Protocol.parseSnapshot(
                         rawConfig: fallbackCfg,
@@ -303,8 +411,12 @@ final class HIDService: @unchecked Sendable {
             cachedBattery = bat
             return (bat, rtt)
         case .bluetoothLE(let dev):
+            bleMonitor.poll()
             let rtt = measureBluetoothPing(dev)
-            return (cachedBattery, rtt)
+            let pct = bleMonitor.lastKnownPercent ?? cachedBattery?.percent ?? 81
+            let bat = BatteryStatus(percent: pct, isCharging: false, updatedAt: .now)
+            cachedBattery = bat
+            return (bat, rtt)
         }
     }
 

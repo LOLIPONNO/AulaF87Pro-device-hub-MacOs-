@@ -147,7 +147,7 @@ final class AppViewModel: ObservableObject {
         if let b = battery {
             return BatteryStatus(percent: b.percent, isCharging: isEffectiveCharging, updatedAt: b.updatedAt)
         }
-        return BatteryStatus(percent: 84, isCharging: isEffectiveCharging, updatedAt: .now)
+        return BatteryStatus(percent: 81, isCharging: isEffectiveCharging, updatedAt: .now)
     }
 
     // Keystroke & Reactive Typing Tracking
