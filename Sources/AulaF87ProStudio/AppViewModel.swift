@@ -804,7 +804,7 @@ final class AppViewModel: ObservableObject {
                     self.statusDetail = nil
                     self.log("설정 적용 완료: 효과=\(LightingEffect.info(for: eff).titleKo), 밝기=\(bri), 속도=\(spd), 측면=\(side), 디바운스=\(deb)단계")
                     if self.connectionMode.contains("Bluetooth") {
-                        self.showToast("효과 저장 완료: '\(LightingEffect.info(for: eff).titleKo)' (블루투스 모드에서는 키보드의 Fn + Ins 키로도 순환 전환 가능)")
+                        self.showToast("⚠️ 블루투스 모드에서는 키보드 하드웨어 특성상 앱을 통한 조명 변경이 지원되지 않습니다. 키보드의 [Fn + Insert] 키로 조명을 직접 변경하시거나, 2.4G 동글 또는 USB 케이블로 연결해주세요.")
                     } else {
                         self.showToast("조명 효과 '\(LightingEffect.info(for: eff).titleKo)'(으)로 적용되었습니다")
                     }

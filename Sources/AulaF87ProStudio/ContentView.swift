@@ -318,6 +318,26 @@ struct ContentView: View {
                         .disabled(vm.isBusy || !vm.isConnected)
                     }
 
+                    if vm.connectionMode.contains("Bluetooth") {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.title3)
+                                .foregroundStyle(.orange)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("블루투스 연결 중 — 조명 소프트웨어 제어 불가 안내")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(.orange)
+                                Text("AULA F87 Pro 제조사 펌웨어 및 macOS 보안 정책상 블루투스 모드에서는 소프트웨어 무선 조명 제어가 지원되지 않습니다.\n• 키보드에서 직접 변경: Fn + Insert (효과), Fn + Delete (색상), Fn + ↑/↓ (밝기), Fn + ←/→ (속도)\n• 앱에서 실시간 원클릭 제어: 2.4GHz 무선 리시버(동글) 또는 USB 케이블로 연결해주세요.")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                    }
+
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 155), spacing: 10)], spacing: 10) {
                         ForEach(LightingEffect.all) { effect in
                             let selected = vm.selectedEffect == effect.id
