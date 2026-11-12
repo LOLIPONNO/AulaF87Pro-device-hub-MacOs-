@@ -141,6 +141,7 @@ final class AppViewModel: ObservableObject {
 
     // Low Battery (10% or below) Full-Screen Warning Banner State
     @Published var isLowBatteryBannerVisible: Bool = false
+    @Published var isLowBatteryTestActive: Bool = false
     @Published var isLowBatteryWarningEnabled: Bool = {
         UserDefaults.standard.object(forKey: "lowBatteryWarningEnabled") as? Bool ?? true
     }() {
@@ -447,6 +448,10 @@ final class AppViewModel: ObservableObject {
 
     func checkLowBatteryWarning() {
         guard isLowBatteryWarningEnabled, let bat = battery, isConnected else {
+            if !isLowBatteryTestActive && isLowBatteryBannerVisible {
+                isLowBatteryBannerVisible = false
+                LowBatteryOverlayManager.shared.hide()
+            }
             return
         }
 
@@ -455,12 +460,17 @@ final class AppViewModel: ObservableObject {
         if isLow {
             let now = Date()
             if let snooze = lowBatteryDismissedUntil, now < snooze {
-                isLowBatteryBannerVisible = false
+                if !isLowBatteryTestActive && isLowBatteryBannerVisible {
+                    isLowBatteryBannerVisible = false
+                    LowBatteryOverlayManager.shared.hide()
+                }
                 return
             }
 
             if !isLowBatteryBannerVisible {
                 isLowBatteryBannerVisible = true
+                isLowBatteryTestActive = false
+                LowBatteryOverlayManager.shared.show(vm: self, isTest: false)
                 if let last = lastLowBatteryAlertTime, now.timeIntervalSince(last) < 300 {
                     // Suppress repeated alert beep
                 } else {
@@ -470,8 +480,14 @@ final class AppViewModel: ObservableObject {
                 }
             }
         } else {
-            isLowBatteryBannerVisible = false
-            lowBatteryDismissedUntil = nil
+            // ONLY dismiss when NOT actively testing!
+            if !isLowBatteryTestActive {
+                if isLowBatteryBannerVisible {
+                    isLowBatteryBannerVisible = false
+                    LowBatteryOverlayManager.shared.hide()
+                }
+                lowBatteryDismissedUntil = nil
+            }
         }
     }
 
@@ -487,16 +503,24 @@ final class AppViewModel: ObservableObject {
     }
 
     func dismissLowBatteryBanner(snoozeMinutes: Double = 10) {
+        let wasTesting = isLowBatteryTestActive
+        isLowBatteryTestActive = false
         isLowBatteryBannerVisible = false
-        lowBatteryDismissedUntil = Date().addingTimeInterval(snoozeMinutes * 60)
-        showToast("배터리 부족 경고가 \(Int(snoozeMinutes))분 동안 일시 숨김 처리되었습니다.")
+        LowBatteryOverlayManager.shared.hide()
+        if snoozeMinutes > 0 && !wasTesting {
+            lowBatteryDismissedUntil = Date().addingTimeInterval(snoozeMinutes * 60)
+            showToast("배터리 부족 경고가 \(Int(snoozeMinutes))분 동안 일시 숨김 처리되었습니다.")
+        } else {
+            showToast("긴급 경고 화면이 닫혔습니다.")
+        }
     }
 
     func showLowBatteryTestBanner() {
         lowBatteryDismissedUntil = nil
+        isLowBatteryTestActive = true
         isLowBatteryBannerVisible = true
-        NSSound.beep()
-        showToast("배터리 10% 이하 긴급 경고 배너가 화면에 표시되었습니다.")
+        LowBatteryOverlayManager.shared.show(vm: self, isTest: true)
+        showToast("모니터 전체 화면 긴급 경고 테스트가 실행되었습니다. (ESC로 종료)")
     }
 
     func applyEmergencyEcoMode() {

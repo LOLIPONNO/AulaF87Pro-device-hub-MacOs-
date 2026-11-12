@@ -733,3 +733,17 @@ struct HardwareSnapshot: Sendable {
     let tapSensitivity: Int    // 0 or 10..127
     let battery: BatteryStatus?
 }
+
+public func formatUsageHours(_ hours: Double) -> String {
+    guard hours > 0 else { return "0분" }
+    let h = Int(hours)
+    let m = Int(((hours - Double(h)) * 60).rounded())
+    if h == 0 {
+        return "\(m)분"
+    } else if m == 0 {
+        return "\(h)시간"
+    } else {
+        return "\(h)시간 \(m)분"
+    }
+}
+
