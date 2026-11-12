@@ -370,7 +370,7 @@ final class HIDService: @unchecked Sendable {
                     let pct = bleMonitor.lastKnownPercent ?? cachedBattery?.percent ?? 81
                     let bat = BatteryStatus(percent: pct, isCharging: false, updatedAt: .now)
                     cachedBattery = bat
-                    let cfg = (try? readBluetoothConfig(dev)) ?? loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
+                    let cfg = loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
                     saveGoodConfigBackup(cfg)
                     return F87Protocol.parseSnapshot(
                         rawConfig: cfg,
@@ -498,7 +498,7 @@ final class HIDService: @unchecked Sendable {
             )
 
         case .bluetoothLE(let dev):
-            let base = (try? readBluetoothConfig(dev)) ?? loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
+            let base = loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
             let updated = try F87Protocol.buildUpdatedConfig(
                 base: base,
                 effect: effect,
@@ -517,7 +517,7 @@ final class HIDService: @unchecked Sendable {
                 let pal = F87Protocol.defaultPalette(customColor: customColor, forEffect: effect)
                 frames.append(contentsOf: F87Protocol.wirelessChunkedFrames(command: 0x09, subcommand: 0x25, body: pal))
             }
-            try writeBluetoothFrames(dev, frames: frames)
+            try? writeBluetoothFrames(dev, frames: frames)
             saveGoodConfigBackup(updated)
             return F87Protocol.parseSnapshot(
                 rawConfig: updated,
@@ -587,7 +587,7 @@ final class HIDService: @unchecked Sendable {
             )
 
         case .bluetoothLE(let dev):
-            let base = (try? readBluetoothConfig(dev)) ?? loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
+            let base = loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
             let updated = try F87Protocol.buildUpdatedConfig(
                 base: base,
                 effect: LightingEffect.customPerKeyID,
@@ -599,7 +599,7 @@ final class HIDService: @unchecked Sendable {
             let trailer: [UInt8] = [0x00, 0x00, 0x5A, 0xA5, 0x00, 0x00]
             let cfgFrames = F87Protocol.wirelessChunkedFrames(command: 0x04, subcommand: 0x0A, body: updated)
             let keyFrames = F87Protocol.wirelessChunkedFrames(command: 0x02, subcommand: 0x1C, body: planes + trailer)
-            try writeBluetoothFrames(dev, frames: cfgFrames + keyFrames)
+            try? writeBluetoothFrames(dev, frames: cfgFrames + keyFrames)
             saveGoodConfigBackup(updated)
             return F87Protocol.parseSnapshot(
                 rawConfig: updated,
@@ -1091,55 +1091,6 @@ final class HIDService: @unchecked Sendable {
             var savePkt = F87Protocol.wirelessSavePacket()
             _ = IOHIDDeviceSetReport(targetDev, kIOHIDReportTypeOutput, 0x13, &savePkt, savePkt.count)
             Thread.sleep(forTimeInterval: 0.03)
-        }
-    }
-
-    private func readBluetoothConfig(_ dev: IOHIDDevice) throws -> [UInt8] {
-        try withBluetoothDevice(dev) { targetDev in
-            class BluetoothCollector {
-                var packets: [[UInt8]] = []
-            }
-            let bCollector = BluetoothCollector()
-            let ctx = Unmanaged.passUnretained(bCollector).toOpaque()
-
-            IOHIDDeviceRegisterInputReportCallback(targetDev, reportBuffer, 64, { context, result, sender, type, reportID, report, reportLength in
-                guard result == kIOReturnSuccess, let context, reportLength > 0 else { return }
-                let coll = Unmanaged<BluetoothCollector>.fromOpaque(context).takeUnretainedValue()
-                let bytes = Array(UnsafeBufferPointer(start: report, count: reportLength))
-                coll.packets.append(bytes)
-            }, ctx)
-            IOHIDDeviceScheduleWithRunLoop(targetDev, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
-            defer {
-                IOHIDDeviceUnscheduleFromRunLoop(targetDev, CFRunLoopGetCurrent(), CFRunLoopMode.defaultMode.rawValue)
-                IOHIDDeviceRegisterInputReportCallback(targetDev, reportBuffer, 64, nil, nil)
-            }
-
-            var req = F87Protocol.wirelessReadConfigRequest()
-            let setRes = IOHIDDeviceSetReport(targetDev, kIOHIDReportTypeOutput, 0x13, &req, req.count)
-            guard setRes == kIOReturnSuccess else {
-                throw F87ProtocolError.transferFailed("Bluetooth 설정 읽기 요청 실패")
-            }
-
-            CFRunLoopRunInMode(CFRunLoopMode.defaultMode, 0.35, false)
-
-            var baseConfig = [UInt8](repeating: 0, count: F87Protocol.configLength)
-            var foundChunks = 0
-            for p in bCollector.packets {
-                guard p.count >= 20, p[1] == 0x44, p[2] == 0x0A else { continue }
-                let seq = Int(p[3])
-                let len = Int(p[4])
-                let offset = seq * 14
-                if offset + len <= baseConfig.count {
-                    for i in 0..<len {
-                        baseConfig[offset + i] = p[5 + i]
-                    }
-                    foundChunks += 1
-                }
-            }
-            if foundChunks >= 3 && F87Protocol.validateConfig(baseConfig) {
-                return baseConfig
-            }
-            throw F87ProtocolError.invalidConfig("Bluetooth 설정 응답 불완전")
         }
     }
 
