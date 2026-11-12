@@ -318,26 +318,6 @@ struct ContentView: View {
                         .disabled(vm.isBusy || !vm.isConnected)
                     }
 
-                    if vm.connectionMode.contains("Bluetooth") {
-                        HStack(alignment: .top, spacing: 10) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .font(.title3)
-                                .foregroundStyle(.orange)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text("블루투스 연결 중 — 조명 소프트웨어 제어 불가 안내")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundStyle(.orange)
-                                Text("AULA F87 Pro 제조사 펌웨어 및 macOS 보안 정책상 블루투스 모드에서는 소프트웨어 무선 조명 제어가 지원되지 않습니다.\n• 키보드에서 직접 변경: Fn + Insert (효과), Fn + Delete (색상), Fn + ↑/↓ (밝기), Fn + ←/→ (속도)\n• 앱에서 실시간 원클릭 제어: 2.4GHz 무선 리시버(동글) 또는 USB 케이블로 연결해주세요.")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35), lineWidth: 1))
-                    }
-
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 155), spacing: 10)], spacing: 10) {
                         ForEach(LightingEffect.all) { effect in
                             let selected = vm.selectedEffect == effect.id
@@ -658,23 +638,6 @@ struct ContentView: View {
                     Text("방향키 상단에 위치한 RGB 앰비언트 인디케이터 바의 모드를 설정합니다.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-
-                    if vm.connectionMode.contains("Bluetooth") {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("블루투스 무선 모드 실시간 제어 안내:")
-                                    .font(.caption.bold())
-                                    .foregroundStyle(.orange)
-                                Text("블루투스 모드에서는 키보드 자체 단축키인 [Fn + 왼쪽 Shift]를 누르면 방향키 상단 라이트바 모드가 실시간으로 즉시 전환됩니다.\n(단색 컬러 순환: Fn + Z · 배터리 인디케이터: Fn + B)\n2.4GHz 무선 동글 또는 USB 케이블로 연결 시 앱에서 직접 원클릭 제어됩니다.")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        .padding(8)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.10)))
-                    }
 
                     ForEach(SideLightMode.all) { mode in
                         let selected = vm.lightBarMode == mode.id

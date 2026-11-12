@@ -496,7 +496,7 @@ final class HIDService: @unchecked Sendable {
                 battery: cachedBattery
             )
 
-        case .bluetoothLE:
+        case .bluetoothLE(let dev):
             let base = loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
             let updated = try F87Protocol.buildUpdatedConfig(
                 base: base,
@@ -510,6 +510,21 @@ final class HIDService: @unchecked Sendable {
                 debounceStage: debounceStage,
                 tapSensitivity: tapSensitivity
             )
+            var frames = F87Protocol.wirelessChunkedFrames(command: 0x04, subcommand: 0x0A, body: updated)
+            let info = LightingEffect.info(for: effect)
+            if info.supportsColor && !colorful && effect != 0 {
+                let pal = F87Protocol.defaultPalette(customColor: customColor, forEffect: effect)
+                frames.append(contentsOf: F87Protocol.wirelessChunkedFrames(command: 0x09, subcommand: 0x25, body: pal))
+            }
+            let openRes = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            if openRes == kIOReturnSuccess {
+                for frame in frames {
+                    var pkt = frame
+                    _ = IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0x13, &pkt, pkt.count)
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+                sendWirelessSave(dev)
+            }
             saveGoodConfigBackup(updated)
             return F87Protocol.parseSnapshot(
                 rawConfig: updated,
@@ -578,7 +593,7 @@ final class HIDService: @unchecked Sendable {
                 battery: cachedBattery
             )
 
-        case .bluetoothLE:
+        case .bluetoothLE(let dev):
             let base = loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
             let updated = try F87Protocol.buildUpdatedConfig(
                 base: base,
@@ -588,10 +603,23 @@ final class HIDService: @unchecked Sendable {
                 colorful: false,
                 sideLightMode: sideLightMode
             )
+            let trailer: [UInt8] = [0x00, 0x00, 0x5A, 0xA5, 0x00, 0x00]
+            let cfgFrames = F87Protocol.wirelessChunkedFrames(command: 0x04, subcommand: 0x0A, body: updated)
+            let keyFrames = F87Protocol.wirelessChunkedFrames(command: 0x02, subcommand: 0x1C, body: planes + trailer)
+            let frames = cfgFrames + keyFrames
+            let openRes = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            if openRes == kIOReturnSuccess {
+                for frame in frames {
+                    var pkt = frame
+                    _ = IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0x13, &pkt, pkt.count)
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+                sendWirelessSave(dev)
+            }
             saveGoodConfigBackup(updated)
             return F87Protocol.parseSnapshot(
                 rawConfig: updated,
-                connectionMode: "Bluetooth 5.0 (개별 키 맵 저장됨 · 2.4G/USB 연결 시 하드웨어 반영)",
+                connectionMode: "Bluetooth 5.0 (AULA-F87Pro 5.0 · 3554:FA07)",
                 modelName: cachedModelName,
                 battery: cachedBattery
             )
@@ -631,11 +659,22 @@ final class HIDService: @unchecked Sendable {
                 modelName: cachedModelName,
                 battery: cachedBattery
             )
-        case .bluetoothLE:
+        case .bluetoothLE(let dev):
+            let cfgFrames = F87Protocol.wirelessChunkedFrames(command: 0x04, subcommand: 0x0A, body: defaultCfg)
+            let palFrames = F87Protocol.wirelessChunkedFrames(command: 0x09, subcommand: 0x25, body: defaultPal)
+            let openRes = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            if openRes == kIOReturnSuccess {
+                for frame in (cfgFrames + palFrames) {
+                    var pkt = frame
+                    _ = IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0x13, &pkt, pkt.count)
+                    Thread.sleep(forTimeInterval: 0.005)
+                }
+                sendWirelessSave(dev)
+            }
             saveGoodConfigBackup(defaultCfg)
             return F87Protocol.parseSnapshot(
                 rawConfig: defaultCfg,
-                connectionMode: "Bluetooth 5.0 (초기값 복원됨 · 2.4G/USB 연결 시 하드웨어 반영)",
+                connectionMode: "Bluetooth 5.0 (AULA-F87Pro 5.0 · 3554:FA07)",
                 modelName: cachedModelName,
                 battery: cachedBattery
             )
