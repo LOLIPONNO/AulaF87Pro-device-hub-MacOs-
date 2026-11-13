@@ -181,9 +181,15 @@ enum F87Protocol {
         cfg[offsetEffect] = UInt8(max(0, min(18, effect)))
         cfg[offsetColorMode] = 1
         cfg[offsetSideLight] = UInt8(max(0, min(4, sideLightMode)))
+        if sideLightMode > 0 && cfg[20] == 0 {
+            cfg[20] = 2
+        }
 
         if let lightBarMode {
             cfg[offsetLightBar] = UInt8(max(0, min(4, lightBarMode)))
+            if lightBarMode > 0 && cfg[30] == 0 {
+                cfg[30] = 4
+            }
         }
         if let sleepRawSteps {
             cfg[offsetSleepSteps] = UInt8(max(0, min(240, sleepRawSteps)))

@@ -199,6 +199,7 @@ final class AppViewModel: ObservableObject {
     private let hidQueue = DispatchQueue(label: "com.antigravity.aulaf87pro.hid", qos: .userInitiated)
     private let musicVisualizer = MusicVisualizer()
     private var audioStreamFrameInFlight = false
+    private var hasPendingLightingApply = false
     private var batteryTimer: Timer?
     private var isPollingHID = false
 
@@ -209,12 +210,19 @@ final class AppViewModel: ObservableObject {
         return dir.appendingPathComponent("profiles.json")
     }()
 
+    private var safeNotificationCenter: UNUserNotificationCenter? {
+        guard Bundle.main.bundleIdentifier != nil, Bundle.main.bundleURL.pathExtension == "app" else {
+            return nil
+        }
+        return UNUserNotificationCenter.current()
+    }
+
     init() {
         perKeyColors = hidService.loadPerKeyCache()
         loadProfilesFromDisk()
         setupKeyMonitoring()
         setupDeviceStateMonitoring()
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        safeNotificationCenter?.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         if !CommandLine.arguments.contains("--probe") {
             connectKeyboard()
             startBatteryPolling()
@@ -366,6 +374,14 @@ final class AppViewModel: ObservableObject {
                 self.handleHotplugEvent()
             }
         }
+        hidService.onBatteryChanged = { [weak self] newBat in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let isWired = self.connectionMode.contains("USB")
+                self.battery = BatteryStatus(percent: newBat.percent, isCharging: newBat.isCharging || isWired, updatedAt: .now)
+                self.checkAlDenteNotification()
+            }
+        }
     }
 
     private func handleHotplugEvent() {
@@ -499,7 +515,7 @@ final class AppViewModel: ObservableObject {
         content.sound = .default
 
         let request = UNNotificationRequest(identifier: "low-bat-\(Date().timeIntervalSince1970)", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { _ in }
+        safeNotificationCenter?.add(request) { _ in }
     }
 
     func dismissLowBatteryBanner(snoozeMinutes: Double = 10) {
@@ -539,7 +555,7 @@ final class AppViewModel: ObservableObject {
         content.sound = .default
 
         let request = UNNotificationRequest(identifier: "aldente-limit-\(Date().timeIntervalSince1970)", content: content, trigger: nil)
-        UNUserNotificationCenter.current().add(request) { _ in }
+        safeNotificationCenter?.add(request) { _ in }
     }
 
     private func startBatteryPolling() {
@@ -620,10 +636,19 @@ final class AppViewModel: ObservableObject {
                     self?.isPollingHID = false
                 }
             }
+            if !self.hidService.isConnected {
+                _ = try? self.hidService.connectAndReadSnapshot()
+            }
             if let outcome = self.hidService.pollBatteryAndLatency() {
                 DispatchQueue.main.async {
-                    let toast = "실시간 갱신 완료: \(String(format: "%.1f", outcome.latencyMs))ms 핑 · 배터리 \(outcome.bat?.percent ?? self.battery?.percent ?? 0)%"
+                    self.isConnected = true
+                    let pctText = (outcome.bat?.percent ?? self.battery?.percent).map { "\($0)%" } ?? "측정 중"
+                    let toast = "실시간 갱신 완료: \(String(format: "%.1f", outcome.latencyMs))ms 핑 · 배터리 \(pctText)"
                     self.recordLatencyMeasurements(samples: [outcome.latencyMs], bat: outcome.bat, toastMessage: toast)
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.showToast("연결된 키보드를 찾지 못해 상태를 갱신할 수 없습니다")
                 }
             }
         }
@@ -640,6 +665,9 @@ final class AppViewModel: ObservableObject {
                     self?.isPollingHID = false
                 }
             }
+            if !self.hidService.isConnected {
+                _ = try? self.hidService.connectAndReadSnapshot()
+            }
             var burstSamples: [Double] = []
             for _ in 0..<10 {
                 if let res = self.hidService.pollBatteryAndLatency() {
@@ -649,10 +677,15 @@ final class AppViewModel: ObservableObject {
             }
             if !burstSamples.isEmpty {
                 DispatchQueue.main.async {
+                    self.isConnected = true
                     let avg = burstSamples.reduce(0, +) / Double(burstSamples.count)
                     let minV = burstSamples.min() ?? 0
                     let toast = "벤치마크 완료: 평균 \(String(format: "%.2f", avg))ms (최저 \(String(format: "%.2f", minV))ms)"
                     self.recordLatencyMeasurements(samples: burstSamples, bat: nil, toastMessage: toast)
+                }
+            } else {
+                DispatchQueue.main.async {
+                    self.showToast("연결된 키보드가 없어 벤치마크를 실행할 수 없습니다")
                 }
             }
         }
@@ -763,8 +796,33 @@ final class AppViewModel: ObservableObject {
         applyLightingAndSettingsToHardware()
     }
 
+    func selectBrightness(_ level: Int) {
+        brightness = level
+        applyLightingAndSettingsToHardware()
+    }
+
+    func selectSpeed(_ level: Int) {
+        speed = level
+        applyLightingAndSettingsToHardware()
+    }
+
+    func toggleColorful(_ isOn: Bool) {
+        colorful = isOn
+        applyLightingAndSettingsToHardware()
+    }
+
+    func selectPresetColor(_ color: RGBColor) {
+        selectedColor = color
+        colorful = false
+        applyLightingAndSettingsToHardware()
+    }
+
     func applyLightingAndSettingsToHardware() {
-        guard !isBusy else { return }
+        if isBusy {
+            hasPendingLightingApply = true
+            return
+        }
+        hasPendingLightingApply = false
         stopMusicSyncIfNeeded()
         isBusy = true
         statusTitle = "키보드에 설정 저장 중…"
@@ -799,19 +857,26 @@ final class AppViewModel: ObservableObject {
                     guard let self else { return }
                     self.isBusy = false
                     self.isConnected = true
+                    if self.hasPendingLightingApply {
+                        self.hasPendingLightingApply = false
+                        self.applyLightingAndSettingsToHardware()
+                        return
+                    }
                     self.applySnapshotToUI(snap)
                     self.statusTitle = "\(snap.modelName) 연결됨"
                     self.statusDetail = nil
-                    self.log("설정 적용 완료: 효과=\(LightingEffect.info(for: eff).titleKo), 밝기=\(bri), 속도=\(spd), 측면=\(side), 디바운스=\(deb)단계")
-                    self.showToast("조명 효과 '\(LightingEffect.info(for: eff).titleKo)'(으)로 적용되었습니다")
+                    self.log("설정 적용 완료: 효과=\(LightingEffect.info(for: eff).titleKo), 밝기=\(bri), 속도=\(spd), 측면=\(side), 라이트바=\(bar), 디바운스=\(deb)단계")
+                    self.showToast("조명·설정 적용 완료 (\(LightingEffect.info(for: eff).titleKo) · 라이트바 \(SideLightMode.all.first(where: { $0.id == bar })?.titleKo ?? "\(bar)"))")
                 }
             } catch {
                 DispatchQueue.main.async {
                     guard let self else { return }
+                    self.hasPendingLightingApply = false
                     self.isBusy = false
                     self.statusTitle = "설정 저장 실패"
                     self.statusDetail = error.localizedDescription
                     self.log("설정 적용 실패: \(error.localizedDescription)")
+                    self.showToast("설정 저장 실패: \(error.localizedDescription)")
                 }
             }
         }
@@ -972,11 +1037,12 @@ final class AppViewModel: ObservableObject {
         let colors = perKeyColors
         let bri = max(1, brightness)
         let side = sideLightMode
+        let bar = lightBarMode
         let service = hidService
 
         hidQueue.async { [weak self] in
             do {
-                let snap = try service.applyPerKeyColors(colors: colors, brightness: bri, sideLightMode: side)
+                let snap = try service.applyPerKeyColors(colors: colors, brightness: bri, sideLightMode: side, lightBarMode: bar)
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.isBusy = false
@@ -994,6 +1060,7 @@ final class AppViewModel: ObservableObject {
                     self.statusTitle = "개별 키 저장 실패"
                     self.statusDetail = error.localizedDescription
                     self.log("개별 키 RGB 저장 오류: \(error.localizedDescription)")
+                    self.showToast("개별 키 저장 실패: \(error.localizedDescription)")
                 }
             }
         }
@@ -1002,6 +1069,13 @@ final class AppViewModel: ObservableObject {
     // MARK: - Key Matrix Remapping (Layers 0..2)
 
     func loadMatrixLayer(_ layer: Int) {
+        if connectionMode.contains("Bluetooth") {
+            matrixLayers[layer] = F87Protocol.defaultMatrix(forLayer: layer)
+            statusTitle = "\(modelName) 연결됨"
+            log("블루투스 미리보기용 기본 레이어 \(layer) 매핑 로드 (하드웨어 읽기/저장은 2.4GHz·USB에서 지원)")
+            showToast("블루투스 모드: 기본 키 매핑 미리보기 (플래시 읽기는 2.4GHz/USB 연결 필요)")
+            return
+        }
         guard !isBusy else { return }
         stopMusicSyncIfNeeded()
         isBusy = true
@@ -1016,6 +1090,7 @@ final class AppViewModel: ObservableObject {
                     self.isBusy = false
                     self.matrixLayers[layer] = data
                     self.statusTitle = "\(self.modelName) 연결됨"
+                    self.statusDetail = nil
                     self.log("레이어 \(layer) 키 매핑 데이터 로드 완료 (504 바이트)")
                     self.showToast("레이어 \(layer) 키 매핑을 불러왔습니다")
                 }
@@ -1026,6 +1101,7 @@ final class AppViewModel: ObservableObject {
                     self.statusTitle = "키 매트릭스 읽기 실패"
                     self.statusDetail = error.localizedDescription
                     self.log("레이어 \(layer) 읽기 실패: \(error.localizedDescription)")
+                    self.showToast("레이어 \(layer) 읽기 실패: \(error.localizedDescription)")
                 }
             }
         }
@@ -1217,8 +1293,13 @@ final class AppViewModel: ObservableObject {
                 }
             }
             musicVisualizer.startDemoWave(callback: handler)
-            log("뮤직 싱크 시작 (내장 리듬 신디사이저 모드)")
-            showToast("내장 리듬 뮤직 싱크가 시작되었습니다")
+            if connectionMode.contains("Bluetooth") {
+                log("뮤직 싱크 시작 (블루투스: 화면 87키 이퀄라이저 프리뷰 활성 · 실물 LED 연동은 2.4GHz/USB 필요)")
+                showToast("화면 스펙트럼 시작 (실물 LED 실시간 연동은 2.4GHz/USB 필요)")
+            } else {
+                log("뮤직 싱크 시작 (내장 리듬 신디사이저 모드)")
+                showToast("내장 리듬 뮤직 싱크가 시작되었습니다")
+            }
         } else {
             Task { @MainActor in
                 let granted = await MusicVisualizer.requestMicrophonePermission()
@@ -1352,6 +1433,7 @@ final class AppViewModel: ObservableObject {
             colorful: colorful,
             color: selectedColor,
             sideLightMode: sideLightMode,
+            lightBarMode: lightBarMode,
             perKey: perKeyColors
         )
         profiles.insert(StoredProfile(name: finalName, profile: profile), at: 0)
@@ -1367,6 +1449,9 @@ final class AppViewModel: ObservableObject {
         colorful = p.colorful
         selectedColor = p.color
         sideLightMode = p.sideLightMode
+        if let bar = p.lightBarMode {
+            lightBarMode = bar
+        }
         if !p.perKey.isEmpty {
             perKeyColors = p.perKey
         }

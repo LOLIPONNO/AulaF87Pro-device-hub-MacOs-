@@ -29,7 +29,7 @@ final class LowBatteryOverlayManager: ObservableObject {
     func show(vm: AppViewModel, isTest: Bool) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.hide()
+            self.hideNow()
 
             let screens = NSScreen.screens
             guard !screens.isEmpty else { return }
@@ -42,6 +42,7 @@ final class LowBatteryOverlayManager: ObservableObject {
                     defer: false,
                     screen: screen
                 )
+                window.isReleasedWhenClosed = false
 
                 window.level = .screenSaver
                 window.isOpaque = false
@@ -87,14 +88,23 @@ final class LowBatteryOverlayManager: ObservableObject {
     }
 
     func hide() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            for win in self.activeWindows {
-                win.orderOut(nil)
+        if Thread.isMainThread {
+            hideNow()
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.hideNow()
             }
-            self.activeWindows.removeAll()
-            self.isCurrentlyPresented = false
         }
+    }
+
+    private func hideNow() {
+        for win in activeWindows {
+            win.onDismiss = nil
+            win.orderOut(nil)
+            win.contentView = nil
+        }
+        activeWindows.removeAll()
+        isCurrentlyPresented = false
     }
 }
 

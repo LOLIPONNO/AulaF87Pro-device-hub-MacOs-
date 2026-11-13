@@ -157,24 +157,71 @@ final class HIDService: @unchecked Sendable {
     private var scheduleDepth: Int = 0
     private let collector = HIDPacketCollector()
     private let reportBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: 64)
+    private let batteryLock = NSLock()
+    private static let karabinerLock = NSLock()
+    private static var lastKarabinerRestoreTime: CFAbsoluteTime = 0
+    private var _cachedBattery: BatteryStatus? = nil
+    var cachedBattery: BatteryStatus? {
+        get {
+            batteryLock.lock()
+            defer { batteryLock.unlock() }
+            return _cachedBattery
+        }
+        set {
+            batteryLock.lock()
+            _cachedBattery = newValue
+            batteryLock.unlock()
+        }
+    }
     private(set) var cachedModelName: String = "AULA F87 Pro V1"
-    private(set) var cachedBattery: BatteryStatus? = BatteryStatus(percent: 81, isCharging: false, updatedAt: .now)
     private(set) var lastMeasuredRttMs: Double = 2.1
     var onDeviceStateChange: (@Sendable () -> Void)?
+    var onBatteryChanged: (@Sendable (BatteryStatus) -> Void)?
     private let bleMonitor = BLEBatteryMonitor()
 
-    private let backupDirectory: URL = {
+    private static let backupDirectoryURL: URL = {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let dir = appSupport.appendingPathComponent("AulaF87ProStudio", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }()
 
+    private var backupDirectory: URL { Self.backupDirectoryURL }
+
+    private static var karabinerConfigURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/karabiner/karabiner.json")
+    }
+
+    private static var karabinerPendingRestoreURL: URL {
+        backupDirectoryURL.appendingPathComponent("karabiner_pending_restore.json")
+    }
+
+    static func restorePendingKarabinerConfigIfNeeded() {
+        karabinerLock.lock()
+        defer { karabinerLock.unlock() }
+        let pendingURL = karabinerPendingRestoreURL
+        guard FileManager.default.fileExists(atPath: pendingURL.path) else { return }
+        guard let origData = try? Data(contentsOf: pendingURL),
+              (try? JSONSerialization.jsonObject(with: origData)) != nil else {
+            return
+        }
+        do {
+            try origData.write(to: karabinerConfigURL, options: .atomic)
+            lastKarabinerRestoreTime = CFAbsoluteTimeGetCurrent()
+            try? FileManager.default.removeItem(at: pendingURL)
+        } catch {
+            // Keep pending marker so a future launch or call retries restoration.
+        }
+    }
+
     init() {
+        Self.restorePendingKarabinerConfigIfNeeded()
         bleMonitor.onBatteryUpdate = { [weak self] pct in
             guard let self else { return }
             let chg = self.cachedBattery?.isCharging ?? false
-            self.cachedBattery = BatteryStatus(percent: pct, isCharging: chg, updatedAt: .now)
+            let updated = BatteryStatus(percent: pct, isCharging: chg, updatedAt: .now)
+            self.cachedBattery = updated
+            self.onBatteryChanged?(updated)
             self.onDeviceStateChange?()
         }
         bleMonitor.startMonitoring()
@@ -182,6 +229,7 @@ final class HIDService: @unchecked Sendable {
 
     deinit {
         disconnect()
+        Self.restorePendingKarabinerConfigIfNeeded()
         reportBuffer.deallocate()
     }
 
@@ -367,16 +415,21 @@ final class HIDService: @unchecked Sendable {
                 } else if pid == F87Protocol.bluetoothPID {
                     activeTransport = .bluetoothLE(dev)
                     bleMonitor.poll()
-                    let pct = bleMonitor.lastKnownPercent ?? cachedBattery?.percent ?? 81
-                    let bat = BatteryStatus(percent: pct, isCharging: false, updatedAt: .now)
-                    cachedBattery = bat
+                    let currentBat: BatteryStatus?
+                    if let pct = bleMonitor.lastKnownPercent {
+                        let bat = BatteryStatus(percent: pct, isCharging: false, updatedAt: .now)
+                        cachedBattery = bat
+                        currentBat = bat
+                    } else {
+                        currentBat = cachedBattery
+                    }
                     let cfg = loadGoodConfigBackup() ?? F87Protocol.factoryDefaultConfig
                     saveGoodConfigBackup(cfg)
                     return F87Protocol.parseSnapshot(
                         rawConfig: cfg,
                         connectionMode: "Bluetooth 5.0 (AULA-F87Pro 5.0 · 3554:FA07)",
                         modelName: cachedModelName,
-                        battery: cachedBattery
+                        battery: currentBat
                     )
                 }
             } catch {
@@ -414,10 +467,11 @@ final class HIDService: @unchecked Sendable {
         case .bluetoothLE(let dev):
             bleMonitor.poll()
             let rtt = measureBluetoothPing(dev)
-            let pct = bleMonitor.lastKnownPercent ?? cachedBattery?.percent ?? 81
-            let bat = BatteryStatus(percent: pct, isCharging: false, updatedAt: .now)
-            cachedBattery = bat
-            return (bat, rtt)
+            if let pct = bleMonitor.lastKnownPercent {
+                let bat = BatteryStatus(percent: pct, isCharging: false, updatedAt: .now)
+                cachedBattery = bat
+            }
+            return (cachedBattery, rtt)
         }
     }
 
@@ -435,6 +489,9 @@ final class HIDService: @unchecked Sendable {
         debounceStage: Int,
         tapSensitivity: Int
     ) throws -> HardwareSnapshot {
+        if activeTransport == nil {
+            _ = try? connectAndReadSnapshot()
+        }
         guard let activeTransport else { throw F87ProtocolError.deviceNotFound }
         switch activeTransport {
         case .wiredUSB(let dev):
@@ -517,7 +574,7 @@ final class HIDService: @unchecked Sendable {
                 let pal = F87Protocol.defaultPalette(customColor: customColor, forEffect: effect)
                 frames.append(contentsOf: F87Protocol.wirelessChunkedFrames(command: 0x09, subcommand: 0x25, body: pal))
             }
-            try? writeBluetoothFrames(dev, frames: frames)
+            try writeBluetoothFrames(dev, frames: frames)
             saveGoodConfigBackup(updated)
             return F87Protocol.parseSnapshot(
                 rawConfig: updated,
@@ -531,9 +588,10 @@ final class HIDService: @unchecked Sendable {
     func applyPerKeyColors(
         colors: [Int: RGBColor],
         brightness: Int,
-        sideLightMode: Int
+        sideLightMode: Int,
+        lightBarMode: Int? = nil
     ) throws -> HardwareSnapshot {
-        if case .bluetoothLE = activeTransport {
+        if activeTransport == nil {
             _ = try? connectAndReadSnapshot()
         }
         guard let activeTransport else { throw F87ProtocolError.deviceNotFound }
@@ -549,7 +607,8 @@ final class HIDService: @unchecked Sendable {
                 brightness: max(1, brightness),
                 speed: 2,
                 colorful: false,
-                sideLightMode: sideLightMode
+                sideLightMode: sideLightMode,
+                lightBarMode: lightBarMode
             )
             try writeWiredBlock(dev, command: 0x06, payload: planes)
             try writeWiredBlock(dev, command: 0x04, payload: updated)
@@ -570,7 +629,8 @@ final class HIDService: @unchecked Sendable {
                 brightness: max(1, brightness),
                 speed: 2,
                 colorful: false,
-                sideLightMode: sideLightMode
+                sideLightMode: sideLightMode,
+                lightBarMode: lightBarMode
             )
             let trailer: [UInt8] = [0x00, 0x00, 0x5A, 0xA5, 0x00, 0x00]
             let cfgFrames = F87Protocol.wirelessChunkedFrames(command: 0x04, subcommand: 0x0A, body: updated)
@@ -594,12 +654,13 @@ final class HIDService: @unchecked Sendable {
                 brightness: max(1, brightness),
                 speed: 2,
                 colorful: false,
-                sideLightMode: sideLightMode
+                sideLightMode: sideLightMode,
+                lightBarMode: lightBarMode
             )
             let trailer: [UInt8] = [0x00, 0x00, 0x5A, 0xA5, 0x00, 0x00]
             let cfgFrames = F87Protocol.wirelessChunkedFrames(command: 0x04, subcommand: 0x0A, body: updated)
             let keyFrames = F87Protocol.wirelessChunkedFrames(command: 0x02, subcommand: 0x1C, body: planes + trailer)
-            try? writeBluetoothFrames(dev, frames: cfgFrames + keyFrames)
+            try writeBluetoothFrames(dev, frames: cfgFrames + keyFrames)
             saveGoodConfigBackup(updated)
             return F87Protocol.parseSnapshot(
                 rawConfig: updated,
@@ -611,7 +672,7 @@ final class HIDService: @unchecked Sendable {
     }
 
     func restoreFactoryDefaults() throws -> HardwareSnapshot {
-        if case .bluetoothLE = activeTransport {
+        if activeTransport == nil {
             _ = try? connectAndReadSnapshot()
         }
         guard let activeTransport else { throw F87ProtocolProtocolNotConnected() }
@@ -672,14 +733,14 @@ final class HIDService: @unchecked Sendable {
         case .wiredUSB(let dev):
             return try readWiredMatrix(dev, layer: UInt8(layer))
         case .wireless24G(let dev):
-            return (try? readWirelessMatrix(dev, layer: UInt8(layer))) ?? F87Protocol.defaultMatrix(forLayer: layer)
+            return try readWirelessMatrix(dev, layer: UInt8(layer))
         case .bluetoothLE:
             return F87Protocol.defaultMatrix(forLayer: layer)
         }
     }
 
     func writeKeyMatrix(layer: Int, matrix: [UInt8]) throws {
-        if case .bluetoothLE = activeTransport {
+        if activeTransport == nil {
             _ = try? connectAndReadSnapshot()
         }
         guard (0...2).contains(layer) else {
@@ -1006,8 +1067,8 @@ final class HIDService: @unchecked Sendable {
                 }
                 Thread.sleep(forTimeInterval: 0.006)
             }
-            if ackedCount == 0 {
-                throw F87ProtocolError.timeout("키보드가 제어 패킷에 응답하지 않습니다. 키를 눌러 절전 모드를 깨워주세요.")
+            if ackedCount < frames.count {
+                throw F87ProtocolError.timeout("키보드 제어 패킷 응답이 불완전합니다 (\(ackedCount)/\(frames.count)). 키를 눌러 절전 모드를 깨운 후 다시 시도해주세요.")
             }
         }
     }
@@ -1024,73 +1085,147 @@ final class HIDService: @unchecked Sendable {
     // MARK: - Low-Level Bluetooth LE Implementation
 
     private func withBluetoothDevice<T>(_ dev: IOHIDDevice, _ block: (IOHIDDevice) throws -> T) throws -> T {
-        let initialOpen = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
-        if initialOpen == kIOReturnSuccess {
-            defer { IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone)) }
-            return try block(dev)
+        Self.restorePendingKarabinerConfigIfNeeded()
+
+        Self.karabinerLock.lock()
+        defer { Self.karabinerLock.unlock() }
+
+        // If we recently restored karabiner.json, wait until Karabiner-Core-Service finishes
+        // re-grabbing the keyboard (reports kIOReturnExclusiveAccess) before checking initialOpen,
+        // so we never race into Karabiner's ~0.2-1.2s VirtualHID startup window.
+        let sinceRestore = CFAbsoluteTimeGetCurrent() - Self.lastKarabinerRestoreTime
+        var initialOpen = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+        if Self.lastKarabinerRestoreTime > 0 && sinceRestore < 2.5 && initialOpen == kIOReturnSuccess {
+            IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            let settleDeadline = CFAbsoluteTimeGetCurrent() + 2.5
+            while CFAbsoluteTimeGetCurrent() < settleDeadline {
+                Thread.sleep(forTimeInterval: 0.05)
+                let probe = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+                if probe == kIOReturnSuccess {
+                    IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+                } else {
+                    initialOpen = probe
+                    break
+                }
+            }
+            if initialOpen == kIOReturnSuccess {
+                initialOpen = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            }
         }
 
-        let configURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/karabiner/karabiner.json")
-        guard initialOpen == kIOReturnExclusiveAccess,
-              let origData = try? Data(contentsOf: configURL),
-              var json = try? JSONSerialization.jsonObject(with: origData) as? [String: Any],
-              var profiles = json["profiles"] as? [[String: Any]],
-              !profiles.isEmpty else {
+        if initialOpen == kIOReturnSuccess {
+            do {
+                let result = try block(dev)
+                IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+                return result
+            } catch {
+                IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+                // If Karabiner seized the device mid-transfer right after opening unseized, retry via ungrab path once.
+                let msg = error.localizedDescription
+                guard msg.contains("E00002C5") else { throw error }
+                Thread.sleep(forTimeInterval: 0.15)
+                let retryOpen = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+                if retryOpen == kIOReturnSuccess {
+                    IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+                    throw error
+                }
+                initialOpen = retryOpen
+            }
+        }
+
+        if initialOpen == kIOReturnNotPermitted {
+            _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+            throw F87ProtocolError.openFailed("macOS '입력 모니터링(Input Monitoring)' 권한이 필요합니다. 시스템 설정 > 개인정보 보호 및 보안 > 입력 모니터링에서 'AULA F87 Pro Studio'를 허용해주세요.")
+        }
+
+        guard initialOpen == kIOReturnExclusiveAccess else {
             throw F87ProtocolError.transferFailed(String(format: "Bluetooth HID 열기 실패 (0x%X)", UInt32(bitPattern: initialOpen)))
         }
 
+        let configURL = Self.karabinerConfigURL
+        let pendingURL = Self.karabinerPendingRestoreURL
+        guard let origData = try? Data(contentsOf: configURL),
+              var json = try? JSONSerialization.jsonObject(with: origData) as? [String: Any],
+              var profiles = json["profiles"] as? [[String: Any]],
+              !profiles.isEmpty else {
+            throw F87ProtocolError.transferFailed("Bluetooth HID가 다른 프로그램(Karabiner 등)에 의해 독점 사용 중이며 설정 파일을 읽을 수 없습니다.")
+        }
+
+        let targetProfileIdx = profiles.firstIndex(where: { ($0["selected"] as? Bool) == true }) ?? 0
+        var devices = (profiles[targetProfileIdx]["devices"] as? [[String: Any]]) ?? []
         var modified = false
-        if var devices = profiles[0]["devices"] as? [[String: Any]] {
-            for i in 0..<devices.count {
-                if let id = devices[i]["identifiers"] as? [String: Any],
-                   let pid = id["product_id"] as? Int, pid == F87Protocol.bluetoothPID {
-                    devices[i]["ignore"] = true
-                    modified = true
-                }
+        for i in 0..<devices.count {
+            if let id = devices[i]["identifiers"] as? [String: Any],
+               let pid = id["product_id"] as? Int, pid == F87Protocol.bluetoothPID {
+                devices[i]["ignore"] = true
+                modified = true
             }
-            profiles[0]["devices"] = devices
-            json["profiles"] = profiles
+        }
+        if !modified {
+            devices.append([
+                "identifiers": [
+                    "is_keyboard": true,
+                    "is_pointing_device": true,
+                    "product_id": F87Protocol.bluetoothPID,
+                    "vendor_id": F87Protocol.wirelessVID
+                ],
+                "ignore": true
+            ])
+            modified = true
+        }
+        profiles[targetProfileIdx]["devices"] = devices
+        json["profiles"] = profiles
+
+        guard let modData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) else {
+            throw F87ProtocolError.transferFailed("Karabiner 임시 설정 직렬화에 실패했습니다.")
         }
 
-        guard modified, let modData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) else {
-            throw F87ProtocolError.transferFailed("Bluetooth 키보드 접근 권한을 획득할 수 없습니다.")
-        }
-
-        try modData.write(to: configURL)
+        // Persist original Karabiner config BEFORE mutating karabiner.json so crashes never strand ignore:true
+        try origData.write(to: pendingURL, options: .atomic)
+        var didOpen = false
         defer {
-            try? origData.write(to: configURL)
+            if didOpen {
+                IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            }
+            if (try? origData.write(to: configURL, options: .atomic)) != nil {
+                Self.lastKarabinerRestoreTime = CFAbsoluteTimeGetCurrent()
+                try? FileManager.default.removeItem(at: pendingURL)
+            }
         }
 
-        var opened = false
-        for _ in 1...20 {
-            Thread.sleep(forTimeInterval: 0.04)
-            if IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess {
-                opened = true
+        try modData.write(to: configURL, options: .atomic)
+
+        for _ in 1...60 {
+            Thread.sleep(forTimeInterval: 0.05)
+            let rc = IOHIDDeviceOpen(dev, IOOptionBits(kIOHIDOptionsTypeNone))
+            if rc == kIOReturnSuccess {
+                didOpen = true
                 break
             }
         }
 
-        guard opened else {
-            throw F87ProtocolError.transferFailed("Karabiner 독점 해제 후 Bluetooth HID 열기에 실패했습니다.")
+        guard didOpen else {
+            throw F87ProtocolError.transferFailed("Karabiner 독점 해제 대기(3.0초) 후 Bluetooth HID 열기에 실패했습니다.")
         }
 
-        defer { IOHIDDeviceClose(dev, IOOptionBits(kIOHIDOptionsTypeNone)) }
         return try block(dev)
     }
 
     private func writeBluetoothFrames(_ dev: IOHIDDevice, frames: [[UInt8]]) throws {
         try withBluetoothDevice(dev) { targetDev in
-            for frame in frames {
-                var pkt = frame
-                let res = IOHIDDeviceSetReport(targetDev, kIOHIDReportTypeOutput, 0x13, &pkt, pkt.count)
-                if res != kIOReturnSuccess {
-                    throw F87ProtocolError.transferFailed(String(format: "Bluetooth 리포트 전송 실패 (0x%X)", UInt32(bitPattern: res)))
+            try withScheduledDevice(targetDev) {
+                try sendWirelessFramesWithAck(targetDev, frames: frames)
+                let savePkt = F87Protocol.wirelessSavePacket()
+                let saveRes = setOutputReport(targetDev, reportID: 0x13, bytes: savePkt)
+                guard saveRes == kIOReturnSuccess else {
+                    throw F87ProtocolError.transferFailed(String(format: "Bluetooth 설정 저장 명령 전송 실패 (0x%X)", UInt32(bitPattern: saveRes)))
                 }
-                Thread.sleep(forTimeInterval: 0.008)
+                CFRunLoopRunInMode(.defaultMode, 0.08, false)
+                collector.packets.removeAll()
+                if cachedBattery == nil {
+                    _ = measureWirelessPingAndBattery(targetDev)
+                }
             }
-            var savePkt = F87Protocol.wirelessSavePacket()
-            _ = IOHIDDeviceSetReport(targetDev, kIOHIDReportTypeOutput, 0x13, &savePkt, savePkt.count)
-            Thread.sleep(forTimeInterval: 0.03)
         }
     }
 

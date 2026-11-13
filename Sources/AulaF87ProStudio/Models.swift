@@ -541,6 +541,7 @@ struct F87Profile: Codable, Hashable, Sendable {
     var colorful: Bool
     var color: RGBColor
     var sideLightMode: Int
+    var lightBarMode: Int?
     var perKey: [Int: RGBColor]
 }
 

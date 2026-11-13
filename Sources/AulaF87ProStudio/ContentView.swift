@@ -161,8 +161,14 @@ struct ContentView: View {
                 HStack(spacing: 6) {
                     Image(systemName: batterySymbol(for: bat))
                         .foregroundStyle(batteryColor(for: bat))
-                    Text(bat.isCharging ? "충전 중 ⚡ (\(bat.percent)%)" : "배터리 잔량: \(bat.percent)%")
-                        .font(.caption.bold())
+                    if vm.battery != nil {
+                        Text(bat.isCharging ? "충전 중 ⚡ (\(bat.percent)%)" : "배터리 잔량: \(bat.percent)%")
+                            .font(.caption.bold())
+                    } else {
+                        Text("배터리 측정 중…")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .padding(.top, 2)
             }
@@ -201,9 +207,9 @@ struct ContentView: View {
                 Image(systemName: batterySymbol(for: bat))
                     .font(.system(size: 14))
                     .foregroundStyle(batteryColor(for: bat))
-                Text("\(bat.percent)%")
+                Text(vm.battery != nil ? "\(bat.percent)%" : "--%")
                     .font(.system(size: 13, weight: .bold, design: .rounded))
-                Text(bat.isCharging ? "충전 중 ⚡" : "무선 사용 중")
+                Text(vm.battery == nil ? "측정 중" : (bat.isCharging ? "충전 중 ⚡" : "무선 사용 중"))
                     .font(.caption2)
                     .foregroundStyle(bat.isCharging ? Color.green : Color.secondary)
             }
@@ -371,7 +377,10 @@ struct ContentView: View {
                                     .font(.subheadline.bold())
                                     .foregroundStyle(.cyan)
                             }
-                            Picker("밝기", selection: $vm.brightness) {
+                            Picker("밝기", selection: Binding(
+                                get: { vm.brightness },
+                                set: { vm.selectBrightness($0) }
+                            )) {
                                 ForEach(0...4, id: \.self) { level in
                                     Text(level == 0 ? "0 (꺼짐)" : "\(level)단계").tag(level)
                                 }
@@ -387,7 +396,10 @@ struct ContentView: View {
                                     .font(.subheadline.bold())
                                     .foregroundStyle(vm.selectedEffectInfo.supportsSpeed ? .cyan : .secondary)
                             }
-                            Picker("속도", selection: $vm.speed) {
+                            Picker("속도", selection: Binding(
+                                get: { vm.speed },
+                                set: { vm.selectSpeed($0) }
+                            )) {
                                 ForEach(0...4, id: \.self) { level in
                                     Text("\(level + 1)단").tag(level)
                                 }
@@ -406,8 +418,11 @@ struct ContentView: View {
                             .font(.headline)
 
                         if vm.selectedEffectInfo.supportsColor {
-                            Toggle("레인보우 다채로운 색상 (Colorful 멀티컬러 모드)", isOn: $vm.colorful)
-                                .toggleStyle(.switch)
+                            Toggle("레인보우 다채로운 색상 (Colorful 멀티컬러 모드)", isOn: Binding(
+                                get: { vm.colorful },
+                                set: { vm.toggleColorful($0) }
+                            ))
+                            .toggleStyle(.switch)
 
                             if !vm.colorful {
                                 HStack(spacing: 12) {
@@ -425,8 +440,7 @@ struct ContentView: View {
                                 HStack(spacing: 8) {
                                     ForEach(RGBColor.presets, id: \.name) { preset in
                                         Button {
-                                            vm.selectedColor = preset.color
-                                            vm.colorful = false
+                                            vm.selectPresetColor(preset.color)
                                         } label: {
                                             Circle()
                                                 .fill(preset.color.color)
@@ -719,33 +733,48 @@ struct ContentView: View {
     private var keymapTabView: some View {
         VStack(alignment: .leading, spacing: 16) {
             GroupBox {
-                HStack(spacing: 16) {
-                    Picker("편집할 레이어", selection: $vm.selectedMatrixLayer) {
-                        Text("기본 레이어 (Layer 0)").tag(0)
-                        Text("FN1 레이어 (Fn 조합)").tag(1)
-                        Text("FN2 레이어 (Tap)").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(maxWidth: 420)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 16) {
+                        Picker("편집할 레이어", selection: $vm.selectedMatrixLayer) {
+                            Text("기본 레이어 (Layer 0)").tag(0)
+                            Text("FN1 레이어 (Fn 조합)").tag(1)
+                            Text("FN2 레이어 (Tap)").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 420)
 
-                    Button {
-                        vm.loadMatrixLayer(vm.selectedMatrixLayer)
-                    } label: {
-                        Label("현재 레이어 키보드에서 불러오기", systemImage: "arrow.down.doc.fill")
-                    }
-                    .disabled(vm.isBusy || !vm.isConnected)
+                        Button {
+                            vm.loadMatrixLayer(vm.selectedMatrixLayer)
+                        } label: {
+                            Label(vm.connectionMode.contains("Bluetooth") ? "기본 매핑 불러오기" : "현재 레이어 키보드에서 불러오기", systemImage: "arrow.down.doc.fill")
+                        }
+                        .disabled(vm.isBusy || !vm.isConnected)
 
-                    Button {
-                        vm.saveCurrentMatrixLayerToHardware()
-                    } label: {
-                        Label("키보드에 레이어 저장", systemImage: "checkmark.seal.fill")
-                            .fontWeight(.semibold)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.cyan)
-                    .disabled(vm.isBusy || !vm.isConnected || vm.matrixLayers[vm.selectedMatrixLayer] == nil)
+                        Button {
+                            vm.saveCurrentMatrixLayerToHardware()
+                        } label: {
+                            Label("키보드에 레이어 저장", systemImage: "checkmark.seal.fill")
+                                .fontWeight(.semibold)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.cyan)
+                        .disabled(vm.isBusy || !vm.isConnected || vm.matrixLayers[vm.selectedMatrixLayer] == nil || vm.connectionMode.contains("Bluetooth"))
 
-                    Spacer()
+                        Spacer()
+                    }
+
+                    if vm.connectionMode.contains("Bluetooth") {
+                        HStack(spacing: 8) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(.orange)
+                            Text("블루투스 연결에서는 기본 레이어 미리보기만 지원됩니다. 실제 키보드 매트릭스 읽기 및 플래시 저장은 2.4GHz 리시버(Fn+~) 또는 USB 유선(Fn+W) 연결 시 사용할 수 있습니다.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+                    }
                 }
                 .padding(8)
             }
@@ -938,6 +967,19 @@ struct ContentView: View {
                                 .frame(width: 130)
                         }
                         Spacer()
+                    }
+
+                    if vm.connectionMode.contains("Bluetooth") {
+                        HStack(spacing: 8) {
+                            Image(systemName: "waveform.path.ecg")
+                                .foregroundStyle(.orange)
+                            Text("블루투스 연결에서는 앱 화면 87키 이퀄라이저 스펙트럼이 실시간 동작하며, 키보드 실물 LED 15fps 실시간 스트리밍은 2.4GHz(Fn+~) 또는 USB(Fn+W)에서 지원됩니다.")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
                     }
 
                     if !vm.musicDemoMode {
@@ -1243,7 +1285,7 @@ struct ContentView: View {
                                 .font(.subheadline.bold())
                                 .foregroundStyle(batteryColor(for: vm.effectiveBattery))
                             Spacer()
-                            Text("\(tel.percent)%")
+                            Text(vm.battery != nil ? "\(tel.percent)%" : "--%")
                                 .font(.system(size: 26, weight: .bold, design: .rounded))
                                 .foregroundStyle(batteryColor(for: vm.effectiveBattery))
                         }
@@ -1903,7 +1945,6 @@ struct ContentView: View {
                                 vm.lightBarMode = 0
                                 vm.sleepRawSteps = 2
                                 vm.applyLightingAndSettingsToHardware()
-                                vm.showToast("최대 배터리 절약 모드가 적용되었습니다 (조명 완전 OFF)")
                             } label: {
                                 Label("조명 완전 OFF (최장 180h)", systemImage: "poweroff")
                             }
